@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gift For You</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles/global.css" />
+  <link rel="stylesheet" href="styles/register.css" />
+  <link rel="stylesheet" href="styles/dashboard.css" />
+  <link rel="stylesheet" href="styles/messages.css" />
+  <link rel="stylesheet" href="styles/notification.css" />
+</head>
+<body>
+  <!-- Custom Title Bar -->
+  <div class="title-bar" id="titleBar">
+    <div class="title-bar-drag">
+      <span class="title-bar-icon">🎁</span>
+      <span class="title-bar-text">Gift For You</span>
+    </div>
+    <div class="title-bar-buttons">
+      <button class="title-btn minimize" id="btnMinimize" title="Minimize">─</button>
+      <button class="title-btn close" id="btnClose" title="Close to Tray">✕</button>
+    </div>
+  </div>
+
+  <!-- Connection Status Bar -->
+  <div class="status-bar" id="statusBar">
+    <span class="status-dot" id="statusDot"></span>
+    <span class="status-text" id="statusText">Connecting...</span>
+  </div>
+
+  <!-- Main Content Container -->
+  <div class="app-container" id="appContainer">
+    <!-- Pages will be injected here -->
+  </div>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav" id="bottomNav" style="display:none;">
+    <button class="nav-btn active" data-page="dashboard">
+      <span class="nav-icon">🏠</span>
+      <span class="nav-label">Home</span>
+    </button>
+    <button class="nav-btn" data-page="activity">
+      <span class="nav-icon">🖥️</span>
+      <span class="nav-label">Activity</span>
+    </button>
+    <button class="nav-btn" data-page="messages">
+      <span class="nav-icon">💬</span>
+      <span class="nav-label">Messages</span>
+      <span class="nav-badge" id="msgBadge" style="display:none;">0</span>
+    </button>
+    <button class="nav-btn" data-page="settings">
+      <span class="nav-icon">⚙️</span>
+      <span class="nav-label">Settings</span>
+    </button>
+  </nav>
+
+  <!-- Message Popup Overlay -->
+  <div class="message-popup-overlay" id="messagePopup" style="display:none;">
+    <div class="message-popup-card" id="messagePopupCard">
+      <div class="message-popup-emoji" id="popupEmoji">💛</div>
+      <h3 class="message-popup-title" id="popupTitle"></h3>
+      <p class="message-popup-body" id="popupBody"></p>
+      <button class="btn btn-primary message-popup-dismiss" id="popupDismiss">Got it! 👍</button>
+    </div>
+  </div>
+
+  <script src="pages/app.js"></script>
+</body>
+</html>
