@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Are you studying?</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: rgba(10, 14, 26, 0.95);
+      color: #f1f5f9;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border: 2px solid #ef4444;
+      border-radius: 16px;
+      padding: 24px;
+      text-align: center;
+      animation: pulseBorder 1s infinite alternate;
+    }
+    @keyframes pulseBorder {
+      0% { border-color: #ef4444; box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); }
+      100% { border-color: #f59e0b; box-shadow: 0 0 40px rgba(245, 158, 11, 0.8); }
+    }
+    .icon { font-size: 56px; margin-bottom: 12px; animation: bounce 0.6s infinite alternate; }
+    @keyframes bounce { 0% { transform: translateY(0); } 100% { transform: translateY(-10px); } }
+    h1 { font-size: 22px; font-weight: 800; margin-bottom: 8px; color: #f59e0b; }
+    p { font-size: 13px; color: #94a3b8; margin-bottom: 24px; line-height: 1.5; }
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      background: linear-gradient(135deg, #06d6a0, #3b82f6);
+      color: white;
+      box-shadow: 0 4px 15px rgba(6, 214, 160, 0.4);
+      transition: transform 0.2s;
+    }
+    .btn:hover { transform: scale(1.03); }
+  </style>
+</head>
+<body>
+  <div>
+    <div class="icon">🔔</div>
+    <h1>Are you still studying?</h1>
+    <p>Please confirm your presence! If not confirmed within 2 minutes, study time will pause.</p>
+    <button class="btn" id="btnConfirm">Yes, I am here! 💪</button>
+  </div>
+
+  <audio id="alarmAudio" loop src="../../assets/alarm.mp3"></audio>
+
+  <script>
+    const alarm = document.getElementById('alarmAudio');
+    alarm.play().catch(() => {});
+
+    document.getElementById('btnConfirm').onclick = async () => {
+      if (alarm) alarm.pause();
+      if (window.api && window.api.respondToIdleCheck) {
+        await window.api.respondToIdleCheck(true);
+      } else {
+        window.close();
+      }
+    };
+  </script>
+</body>
+</html>
