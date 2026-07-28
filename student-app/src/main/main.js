@@ -10,6 +10,15 @@ const { setupFirebaseListeners } = require('./sync/socketClient');
 const { setupAutoStart } = require('./autostart');
 const { setupIpcHandlers } = require('./ipc/handlers');
 
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyA4DGA-jHP-OF-TAHKxjsvP5kHxqIu8dPY',
+  authDomain: 'zahra-s-space.firebaseapp.com',
+  projectId: 'zahra-s-space',
+  storageBucket: 'zahra-s-space.firebasestorage.app',
+  messagingSenderId: '1086414376413',
+  appId: '1:1086414376413:web:32b5cdd29a87cad39d3a34',
+};
+
 const store = new Store({
   name: 'gift-for-you-config',
   defaults: {
@@ -17,14 +26,7 @@ const store = new Store({
     studentName: null,
     isRegistered: false,
     syncInterval: 5,
-    firebaseConfig: {
-      apiKey: '',
-      authDomain: '',
-      projectId: '',
-      storageBucket: '',
-      messagingSenderId: '',
-      appId: '',
-    },
+    firebaseConfig: DEFAULT_FIREBASE_CONFIG,
   },
 });
 
@@ -95,7 +97,12 @@ function createTray() {
 
 // Initialize Firebase and start monitoring
 function startServices() {
-  const fbConfig = store.get('firebaseConfig');
+  let fbConfig = store.get('firebaseConfig');
+  if (!fbConfig || !fbConfig.apiKey) {
+    fbConfig = DEFAULT_FIREBASE_CONFIG;
+    store.set('firebaseConfig', DEFAULT_FIREBASE_CONFIG);
+  }
+
   const initialized = initFirebase(fbConfig);
 
   if (initialized && store.get('isRegistered')) {

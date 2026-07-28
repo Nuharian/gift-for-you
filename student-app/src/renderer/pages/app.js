@@ -62,7 +62,7 @@ function showApp() {
   renderDashboard();
 }
 
-// ─── Register Page ────────────────────────────────
+// ─── Register Page (Clean: Name Only) ────────────
 function renderRegisterPage() {
   document.getElementById('bottomNav').style.display = 'none';
   const container = document.getElementById('appContainer');
@@ -70,28 +70,21 @@ function renderRegisterPage() {
     <div class="register-page animate-fadeIn">
       <div class="register-icon">🎁</div>
       <h1 class="register-title"><span class="text-gradient">Gift For You</span></h1>
-      <p class="register-subtitle">Welcome! Enter your name to get started.</p>
+      <p class="register-subtitle">Welcome! Please enter your full name to start.</p>
 
       <div class="register-disclaimer card">
         <h3 style="font-size:13px;color:var(--accent-tertiary);margin-bottom:8px;">⚠️ Monitoring Disclosure</h3>
         <p style="font-size:11px;color:var(--text-muted);line-height:1.6;">
           This application monitors open apps, browser tab names, active window, and study time.
-          Data is sent to your teacher for review. The app starts automatically with Windows.
-          By entering your name, you consent to these terms.
+          Data is sent to your teacher's portal for real-time monitoring.
+          The app starts automatically with Windows.
         </p>
       </div>
 
       <div class="register-form">
-        <input class="input" id="regName" type="text" placeholder="Enter your name…" autocomplete="off" />
+        <input class="input" id="regName" type="text" placeholder="Enter your full name…" autocomplete="off" autofocus />
 
-        <div style="margin-top:12px;">
-          <p style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">Firebase Config (from your teacher)</p>
-          <input class="input" id="regApiKey" type="text" placeholder="API Key" style="margin-bottom:6px;" />
-          <input class="input" id="regProjectId" type="text" placeholder="Project ID" style="margin-bottom:6px;" />
-          <input class="input" id="regAppId" type="text" placeholder="App ID" />
-        </div>
-
-        <button class="btn btn-primary btn-lg btn-full" id="regSubmit" style="margin-top:16px;">
+        <button class="btn btn-primary btn-lg btn-full" id="regSubmit" style="margin-top:20px;">
           Start Studying 🚀
         </button>
         <p class="register-error" id="regError" style="display:none;"></p>
@@ -101,33 +94,16 @@ function renderRegisterPage() {
 
   document.getElementById('regSubmit').onclick = async () => {
     const name = document.getElementById('regName').value.trim();
-    const apiKey = document.getElementById('regApiKey').value.trim();
-    const projectId = document.getElementById('regProjectId').value.trim();
-    const appId = document.getElementById('regAppId').value.trim();
 
     if (!name) {
-      showError('regError', 'Please enter your name.');
-      return;
-    }
-    if (!apiKey || !projectId) {
-      showError('regError', 'Firebase API Key and Project ID are required.');
+      showError('regError', 'Please enter your name to register.');
       return;
     }
 
     document.getElementById('regSubmit').disabled = true;
-    document.getElementById('regSubmit').textContent = '⏳ Connecting...';
+    document.getElementById('regSubmit').textContent = '⏳ Registering...';
 
-    const result = await window.api.register({
-      name,
-      firebaseConfig: {
-        apiKey,
-        authDomain: `${projectId}.firebaseapp.com`,
-        projectId,
-        storageBucket: `${projectId}.firebasestorage.app`,
-        messagingSenderId: '',
-        appId,
-      },
-    });
+    const result = await window.api.register(name);
 
     if (result.success) {
       showApp();
@@ -340,7 +316,7 @@ async function renderSettingsPage() {
         <h3 style="font-size:13px;color:var(--text-muted);margin-bottom:8px;">STATUS</h3>
         <p style="font-size:13px;color:var(--accent-primary);">🟢 Monitoring Active</p>
         <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-          Data syncs every 5 minutes to your teacher's dashboard.
+          Data syncs automatically to your teacher's dashboard.
         </p>
       </div>
 
@@ -349,7 +325,6 @@ async function renderSettingsPage() {
         <p style="font-size:13px;color:var(--text-secondary);">Gift For You v1.0.0</p>
         <p style="font-size:11px;color:var(--text-muted);margin-top:4px;">
           This app runs in the background and auto-starts with Windows.
-          Close to minimize to system tray.
         </p>
       </div>
     </div>
@@ -358,7 +333,6 @@ async function renderSettingsPage() {
 
 // ─── Event Handlers ───────────────────────────────
 function handleNewMessage(message) {
-  // Show popup
   const popup = document.getElementById('messagePopup');
   const card = document.getElementById('messagePopupCard');
   document.getElementById('popupEmoji').textContent = message.emoji || '💛';
@@ -367,7 +341,6 @@ function handleNewMessage(message) {
   card.style.borderColor = message.color || '#FFE5D9';
   popup.style.display = 'flex';
 
-  // Play notification sound
   try {
     const audio = new Audio('../../../assets/message.mp3');
     audio.play().catch(() => {});
@@ -378,7 +351,6 @@ function handleNewMessage(message) {
     if (message.id) window.api.markMessageRead(message.id);
   };
 
-  // Update badge
   const badge = document.getElementById('msgBadge');
   const current = parseInt(badge.textContent || '0');
   badge.textContent = current + 1;
@@ -386,8 +358,6 @@ function handleNewMessage(message) {
 }
 
 function handleIdleCheck(data) {
-  // The idle alert is shown by the main process in a separate window
-  // But we also update the UI
   console.log('Idle check triggered');
 }
 
@@ -401,7 +371,6 @@ function handleStudyUpdate(state) {
 function handleActivityUpdate(activity) {
   updateQuickActivity(activity);
 
-  // Update activity page if visible
   const activeTitle = document.getElementById('activeWindowTitle');
   if (activeTitle && activity) {
     activeTitle.textContent = `${activity.activeApp} — ${activity.activeTitle}`;
@@ -421,7 +390,7 @@ function handleConnectionStatus(data) {
     text.textContent = 'Connected to server';
   } else {
     dot.classList.remove('connected');
-    text.textContent = 'Disconnected — retrying...';
+    text.textContent = 'Connecting to server...';
   }
 }
 
@@ -462,7 +431,6 @@ function showError(elementId, message) {
   }
 }
 
-// Rotate encouraging messages every 3 minutes
 setInterval(() => {
   messageIndex = (messageIndex + 1) % ENCOURAGING_MESSAGES.length;
   const el = document.getElementById('encourageMsg');
