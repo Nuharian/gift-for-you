@@ -5,6 +5,15 @@ const { setupIdleDetector, respondToIdleCheck } = require('../monitor/idleDetect
 const { setupDataSync, forceSyncNow } = require('../sync/dataSync');
 const { setupFirebaseListeners } = require('../sync/socketClient');
 
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyA4DGA-jHP-OF-TAHKxjsvP5kHxqIu8dPY',
+  authDomain: 'zahra-s-space.firebaseapp.com',
+  projectId: 'zahra-s-space',
+  storageBucket: 'zahra-s-space.firebasestorage.app',
+  messagingSenderId: '1086414376413',
+  appId: '1:1086414376413:web:32b5cdd29a87cad39d3a34',
+};
+
 let studyState = {
   isStudying: false,
   isBreak: false,
@@ -17,13 +26,18 @@ let studyTimer = null;
 function setupIpcHandlers(ipcMain, store, mainWindow) {
 
   // ── Registration ──────────────────────────────────
-  ipcMain.handle('register', async (event, { name, firebaseConfig }) => {
+  ipcMain.handle('register', async (event, payload) => {
     try {
+      const name = typeof payload === 'string' ? payload : payload.name;
+      const firebaseConfig = (payload && payload.firebaseConfig && payload.firebaseConfig.apiKey) 
+        ? payload.firebaseConfig 
+        : DEFAULT_FIREBASE_CONFIG;
+
       // Save Firebase config and init
       store.set('firebaseConfig', firebaseConfig);
       const initialized = initFirebase(firebaseConfig);
       if (!initialized) {
-        return { success: false, error: 'Failed to connect to Firebase. Check your config.' };
+        return { success: false, error: 'Failed to connect to Firebase database.' };
       }
 
       const db = getDb();

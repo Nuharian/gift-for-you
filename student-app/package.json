@@ -6,7 +6,7 @@
   "main": "src/main/main.js",
   "scripts": {
     "dev": "electron .",
-    "build": "electron-builder",
+    "build": "electron-builder --win dir",
     "pack": "electron-builder --dir"
   },
   "dependencies": {
@@ -24,15 +24,7 @@
       "output": "dist"
     },
     "win": {
-      "target": ["nsis"],
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "runAfterFinish": true
+      "target": ["dir"]
     }
   }
 }
