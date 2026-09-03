@@ -1,27 +1,49 @@
-// Auto-start on Windows boot
+// Auto-start on Windows login.
 const { app } = require('electron');
 
-function setupAutoStart() {
-  // Set the app to auto-launch on Windows startup
-  app.setLoginItemSettings({
-    openAtLogin: true,
-    openAsHidden: true, // Start minimized to tray
-    path: app.getPath('exe'),
-    args: ['--hidden'],
-  });
+// Registers the app to launch at login, hidden in the tray. Called on every
+// boot so that an update (which changes the install path) re-points the
+// registry entry instead of leaving a dead shortcut behind.
+function setupAutoStart(store) {
+  const startMinimized = !store || store.get('startMinimized') !== false;
 
-  console.log('🚀 Auto-start configured');
+  // In development app.getPath('exe') is electron.exe, so registering would
+  // leave a broken login item on the developer's machine.
+  if (!app.isPackaged) {
+    console.log('🚀 Auto-start skipped (development build)');
+    return;
+  }
+
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: true,
+      openAsHidden: startMinimized,
+      path: app.getPath('exe'),
+      args: startMinimized ? ['--hidden'] : [],
+    });
+    if (store) store.set('autoStart', true);
+    console.log('🚀 Auto-start configured' + (startMinimized ? ' (hidden)' : ''));
+  } catch (e) {
+    console.warn('Auto-start could not be configured:', e.message);
+  }
 }
 
-function disableAutoStart() {
-  app.setLoginItemSettings({
-    openAtLogin: false,
-  });
-  console.log('🚀 Auto-start disabled');
+function disableAutoStart(store) {
+  try {
+    app.setLoginItemSettings({ openAtLogin: false });
+    if (store) store.set('autoStart', false);
+    console.log('🚀 Auto-start disabled');
+  } catch (e) {
+    console.warn('Auto-start could not be disabled:', e.message);
+  }
 }
 
 function isAutoStartEnabled() {
-  return app.getLoginItemSettings().openAtLogin;
+  try {
+    return app.getLoginItemSettings().openAtLogin;
+  } catch (e) {
+    return false;
+  }
 }
 
 module.exports = {

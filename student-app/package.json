@@ -1,20 +1,24 @@
 {
   "name": "gift-for-you",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Gift For You — Student Monitoring Desktop App",
   "main": "src/main/main.js",
+  "author": "Gift For You",
   "scripts": {
     "dev": "electron .",
-    "build": "electron-builder --win dir",
-    "pack": "electron-builder --dir"
+    "build": "electron-builder --win nsis",
+    "pack": "electron-builder --dir",
+    "release": "electron-builder --win nsis --publish always",
+    "draft": "electron-builder --win nsis --publish onTagOrDraft"
   },
   "dependencies": {
     "electron-store": "^8.2.0",
+    "electron-updater": "^6.8.9",
     "firebase": "^10.12.0"
   },
   "devDependencies": {
-    "electron": "^30.0.0",
+    "electron": "^30.5.1",
     "electron-builder": "^24.13.0"
   },
   "build": {
@@ -23,8 +27,33 @@
     "directories": {
       "output": "dist"
     },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Nuharian",
+        "repo": "gift-for-you"
+      }
+    ],
     "win": {
-      "target": ["dir"]
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "Gift-For-You-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
     }
   }
 }

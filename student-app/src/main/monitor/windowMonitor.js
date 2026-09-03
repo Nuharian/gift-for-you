@@ -1,249 +1,366 @@
-// Window Monitor — Uses PowerShell to enumerate open windows
-const { exec } = require('child_process');
-const path = require('path');
+// Window Monitor — tracks which apps/tabs are open and which one is in use.
+//
+// A single long-lived PowerShell worker is polled over stdin instead of
+// spawning powershell.exe on every tick. Accumulated time is written through
+// to disk on every tick so a crash or restart never loses the day's totals.
+const { spawn } = require('child_process');
+const readline = require('readline');
+const { app, powerMonitor } = require('electron');
+const { ensureScriptFile } = require('./psScript');
 
-let monitorInterval = null;
-let activeWindowInterval = null;
+const POLL_MS = 3000;
+// Windows stops counting user input as activity after this many idle seconds.
+const IDLE_THRESHOLD_SEC = 120;
+const MAX_TITLE_ENTRIES = 400;
+
+let psProc = null;
+let psReady = false;
+let pollTimer = null;
+let restartTimer = null;
+let pendingPoll = false;
+let consecutiveFailures = 0;
+let store = null;
+
 let currentActivity = {
   activeApp: null,
   activeTitle: null,
   openWindows: [],
   totalWindows: 0,
   totalTabs: 0,
+  browserWindows: [],
+  isUserIdle: false,
+  systemIdleSec: 0,
   timestamp: null,
 };
 
-// Track per-app timing
-let appTimers = {}; // { appName: { openSince, activeSince, totalOpen, totalActive } }
-let lastActiveApp = null;
+// { [appName]: { appName, openMs, activeMs, lastTitle } }
+let appTimers = {};
+// { [appName|||title]: { appName, title, openMs, activeMs, lastSeen } }
+let titleTimers = {};
 
-// PowerShell command to get all visible windows
-const PS_GET_WINDOWS = `
-Get-Process | Where-Object { $_.MainWindowTitle -ne '' } | 
-Select-Object ProcessName, MainWindowTitle, Id | 
-ConvertTo-Json -Compress
-`.trim().replace(/\n/g, ' ');
+let trackingDate = todayStr();
+let lastTickAt = null;
 
-// PowerShell command to get foreground window
-const PS_GET_ACTIVE = `
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class WinAPI {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")]
-    public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-"@
-$hwnd = [WinAPI]::GetForegroundWindow()
-$sb = New-Object System.Text.StringBuilder 256
-[void][WinAPI]::GetWindowText($hwnd, $sb, 256)
-$pid = 0
-[void][WinAPI]::GetWindowThreadProcessId($hwnd, [ref]$pid)
-$proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-@{ Title = $sb.ToString(); ProcessName = $proc.ProcessName; PID = $pid } | ConvertTo-Json -Compress
-`.trim().replace(/\n/g, ' ');
+const BROWSERS = ['chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'arc', 'iexplore', 'librewolf', 'zen'];
 
-function runPowerShell(command) {
-  return new Promise((resolve, reject) => {
-    exec(
-      `powershell -NoProfile -NonInteractive -Command "${command.replace(/"/g, '\\"')}"`,
-      { timeout: 10000 },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        try {
-          const result = JSON.parse(stdout.trim());
-          resolve(result);
-        } catch {
-          resolve(null);
-        }
-      }
-    );
-  });
-}
-
-async function getActiveWindow() {
-  try {
-    const result = await runPowerShell(PS_GET_ACTIVE);
-    if (result) {
-      return {
-        appName: result.ProcessName || 'Unknown',
-        windowTitle: result.Title || '',
-        pid: result.PID,
-      };
-    }
-  } catch (e) {
-    // Fallback: silent fail
-  }
-  return null;
-}
-
-async function getAllWindows() {
-  try {
-    let result = await runPowerShell(PS_GET_WINDOWS);
-    if (!result) return [];
-    if (!Array.isArray(result)) result = [result];
-
-    return result.map((w) => ({
-      appName: w.ProcessName || 'Unknown',
-      windowTitle: w.MainWindowTitle || '',
-      pid: w.Id,
-    }));
-  } catch (e) {
-    return [];
-  }
+function todayStr() {
+  // Local date, not UTC — a student's "today" is their own calendar day.
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 
 function isBrowser(appName) {
-  const browsers = ['chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'arc'];
-  return browsers.some((b) => (appName || '').toLowerCase().includes(b));
+  const a = (appName || '').toLowerCase();
+  return BROWSERS.some((b) => a.includes(b));
 }
 
-function updateAppTimers(activeWindow, allWindows) {
+function titleKey(appName, title) {
+  return appName + '|||' + title;
+}
+
+// ── Persistence ─────────────────────────────────────
+// Totals live in the store keyed by date so restarting the app (or crashing)
+// resumes the same day's counters rather than restarting them at zero.
+function loadPersisted() {
+  if (!store) return;
+  const saved = store.get('usageTracking');
+  if (saved && saved.date === trackingDate) {
+    appTimers = saved.appTimers || {};
+    titleTimers = saved.titleTimers || {};
+  } else {
+    appTimers = {};
+    titleTimers = {};
+  }
+}
+
+function persist() {
+  if (!store) return;
+  try {
+    store.set('usageTracking', { date: trackingDate, appTimers, titleTimers });
+  } catch (e) {
+    // Disk full or file locked — keep running on in-memory data.
+  }
+}
+
+function rollDateIfNeeded() {
+  const today = todayStr();
+  if (today !== trackingDate) {
+    persist();
+    trackingDate = today;
+    appTimers = {};
+    titleTimers = {};
+    persist();
+  }
+}
+
+// ── Accounting ──────────────────────────────────────
+function accrue(windows, isUserIdle) {
   const now = Date.now();
+  // The first tick after a start or resume has no interval to attribute, and a
+  // long gap (sleep/hibernate) must not be credited as usage.
+  const deltaMs = lastTickAt ? Math.min(now - lastTickAt, POLL_MS * 4) : 0;
+  lastTickAt = now;
+  if (deltaMs <= 0) return;
 
-  // Track all open apps
-  const currentApps = new Set();
-  for (const win of allWindows) {
-    const key = win.appName;
-    currentApps.add(key);
-
+  const seen = new Set();
+  for (const w of windows) {
+    const key = w.appName;
     if (!appTimers[key]) {
-      appTimers[key] = {
-        appName: key,
-        windowTitle: win.windowTitle,
-        openSince: now,
-        activeSince: null,
-        totalOpenMs: 0,
-        totalActiveMs: 0,
-      };
+      appTimers[key] = { appName: key, openMs: 0, activeMs: 0, lastTitle: w.windowTitle };
     }
-    appTimers[key].windowTitle = win.windowTitle;
+    // Count an app's "open" time once per tick even when it has many windows.
+    if (!seen.has(key)) {
+      appTimers[key].openMs += deltaMs;
+      seen.add(key);
+    }
+    appTimers[key].lastTitle = w.windowTitle;
+
+    const tk = titleKey(w.appName, w.windowTitle);
+    if (!titleTimers[tk]) {
+      titleTimers[tk] = { appName: w.appName, title: w.windowTitle, openMs: 0, activeMs: 0, lastSeen: now };
+    }
+    titleTimers[tk].openMs += deltaMs;
+    titleTimers[tk].lastSeen = now;
   }
 
-  // Mark closed apps
-  for (const key of Object.keys(appTimers)) {
-    if (!currentApps.has(key)) {
-      // App closed — finalize timing
-      const timer = appTimers[key];
-      if (timer.openSince) {
-        timer.totalOpenMs += now - timer.openSince;
-        timer.openSince = null;
-      }
-      if (timer.activeSince) {
-        timer.totalActiveMs += now - timer.activeSince;
-        timer.activeSince = null;
-      }
+  // Focused time only accrues while the student is actually at the keyboard,
+  // otherwise a window left in front overnight would look like 8h of work.
+  if (!isUserIdle) {
+    const focused = windows.find((w) => w.isActive);
+    if (focused) {
+      appTimers[focused.appName].activeMs += deltaMs;
+      titleTimers[titleKey(focused.appName, focused.windowTitle)].activeMs += deltaMs;
     }
   }
 
-  // Update active window timing
-  if (activeWindow) {
-    const activeKey = activeWindow.appName;
+  pruneTitles();
+}
 
-    // Deactivate previous active
-    if (lastActiveApp && lastActiveApp !== activeKey && appTimers[lastActiveApp]) {
-      const prevTimer = appTimers[lastActiveApp];
-      if (prevTimer.activeSince) {
-        prevTimer.totalActiveMs += now - prevTimer.activeSince;
-        prevTimer.activeSince = null;
-      }
-    }
+// Browser titles churn constantly; keep the table bounded by dropping the
+// least-used stale entries rather than letting it grow without limit.
+function pruneTitles() {
+  const keys = Object.keys(titleTimers);
+  if (keys.length <= MAX_TITLE_ENTRIES) return;
+  keys
+    .sort((a, b) => {
+      const ta = titleTimers[a];
+      const tb = titleTimers[b];
+      return (ta.activeMs - tb.activeMs) || (ta.openMs - tb.openMs) || (ta.lastSeen - tb.lastSeen);
+    })
+    .slice(0, keys.length - MAX_TITLE_ENTRIES)
+    .forEach((k) => { delete titleTimers[k]; });
+}
 
-    // Activate current
-    if (appTimers[activeKey] && !appTimers[activeKey].activeSince) {
-      appTimers[activeKey].activeSince = now;
-    }
-
-    lastActiveApp = activeKey;
-  }
+// ── Public accessors ────────────────────────────────
+function getCurrentActivity() {
+  return currentActivity;
 }
 
 function getAppUsageSummary() {
-  const now = Date.now();
-  const summary = [];
+  return Object.values(appTimers)
+    .map((t) => ({
+      appName: t.appName,
+      windowTitle: t.lastTitle || '',
+      openSeconds: Math.round(t.openMs / 1000),
+      activeSeconds: Math.round(t.activeMs / 1000),
+    }))
+    .filter((t) => t.openSeconds > 0 || t.activeSeconds > 0)
+    .sort((a, b) => b.activeSeconds - a.activeSeconds || b.openSeconds - a.openSeconds);
+}
 
-  for (const [key, timer] of Object.entries(appTimers)) {
-    let openMs = timer.totalOpenMs;
-    let activeMs = timer.totalActiveMs;
+// "Which tab is most open, which one is being worked on" — per window title.
+function getTitleUsageSummary(limit = 25) {
+  return Object.values(titleTimers)
+    .map((t) => ({
+      appName: t.appName,
+      title: t.title,
+      isBrowserTab: isBrowser(t.appName),
+      openSeconds: Math.round(t.openMs / 1000),
+      activeSeconds: Math.round(t.activeMs / 1000),
+      lastSeen: new Date(t.lastSeen).toISOString(),
+    }))
+    .filter((t) => t.openSeconds > 0 || t.activeSeconds > 0)
+    .sort((a, b) => b.activeSeconds - a.activeSeconds || b.openSeconds - a.openSeconds)
+    .slice(0, limit);
+}
 
-    if (timer.openSince) openMs += now - timer.openSince;
-    if (timer.activeSince) activeMs += now - timer.activeSince;
+function getTrackingDate() {
+  return trackingDate;
+}
 
-    summary.push({
-      appName: key,
-      windowTitle: timer.windowTitle,
-      openSeconds: Math.round(openMs / 1000),
-      activeSeconds: Math.round(activeMs / 1000),
-    });
+function getTotals() {
+  let openMs = 0;
+  let activeMs = 0;
+  for (const t of Object.values(appTimers)) {
+    openMs += t.openMs;
+    activeMs += t.activeMs;
   }
-
-  return summary;
+  return {
+    date: trackingDate,
+    totalOpenSeconds: Math.round(openMs / 1000),
+    totalActiveSeconds: Math.round(activeMs / 1000),
+  };
 }
 
 function resetAppTimers() {
   appTimers = {};
-  lastActiveApp = null;
+  titleTimers = {};
+  lastTickAt = null;
+  persist();
 }
 
-async function pollActivity() {
+// ── PowerShell worker ───────────────────────────────
+function startWorker(onSnapshot) {
+  const scriptPath = ensureScriptFile(app.getPath('userData'));
+
+  psProc = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+    { windowsHide: true }
+  );
+
+  psReady = false;
+  const rl = readline.createInterface({ input: psProc.stdout });
+
+  rl.on('line', (line) => {
+    if (line === 'READY') {
+      psReady = true;
+      consecutiveFailures = 0;
+      console.log('🖥️ Window monitor worker ready');
+      return;
+    }
+    if (line.indexOf('DATA ') === 0) {
+      pendingPoll = false;
+      try {
+        let rows = JSON.parse(line.slice(5));
+        if (!Array.isArray(rows)) rows = [rows];
+        onSnapshot(rows);
+        consecutiveFailures = 0;
+      } catch (e) {
+        console.error('Monitor parse error:', e.message);
+      }
+      return;
+    }
+    if (line.indexOf('ERR ') === 0) {
+      pendingPoll = false;
+      console.error('Monitor worker error:', line.slice(4));
+    }
+  });
+
+  psProc.stderr.on('data', (d) => {
+    const msg = d.toString().trim();
+    if (msg) console.error('Monitor stderr:', msg.slice(0, 300));
+  });
+
+  psProc.on('exit', (code) => {
+    psReady = false;
+    pendingPoll = false;
+    psProc = null;
+    if (restartTimer || !pollTimer) return; // stopped deliberately
+    consecutiveFailures++;
+    // Back off after repeated crashes so a broken host doesn't spin the CPU.
+    const delay = Math.min(30000, 2000 * consecutiveFailures);
+    console.warn('Monitor worker exited (' + code + '); restarting in ' + delay + 'ms');
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      startWorker(onSnapshot);
+    }, delay);
+  });
+
+  psProc.on('error', (e) => {
+    console.error('Failed to start monitor worker:', e.message);
+  });
+}
+
+function requestPoll() {
+  if (!psProc || !psReady) return;
+  // A hung worker must not build up an unbounded backlog of POLL commands.
+  if (pendingPoll) {
+    pendingPoll = false;
+    return;
+  }
+  pendingPoll = true;
   try {
-    const [activeWindow, allWindows] = await Promise.all([
-      getActiveWindow(),
-      getAllWindows(),
-    ]);
-
-    const browserTabs = allWindows.filter((w) => isBrowser(w.appName));
-
-    updateAppTimers(activeWindow, allWindows);
-
-    currentActivity = {
-      activeApp: activeWindow?.appName || null,
-      activeTitle: activeWindow?.windowTitle || null,
-      openWindows: allWindows,
-      totalWindows: allWindows.length,
-      totalTabs: browserTabs.length,
-      timestamp: new Date().toISOString(),
-    };
+    psProc.stdin.write('POLL\n');
   } catch (e) {
-    console.error('Error polling activity:', e);
+    pendingPoll = false;
   }
 }
 
-function setupMonitoring(store, mainWindow) {
-  // Poll active window every 5 seconds
-  activeWindowInterval = setInterval(async () => {
-    await pollActivity();
+function handleSnapshot(rows, mainWindow) {
+  rollDateIfNeeded();
 
-    // Send to renderer for UI display
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('activity:update', currentActivity);
-    }
-  }, 5000);
+  const windows = rows
+    .filter((r) => r && r.t)
+    .map((r) => ({
+      appName: r.a || 'Unknown',
+      windowTitle: String(r.t).slice(0, 300),
+      pid: r.p,
+      isActive: !!r.f,
+      isMinimized: !!r.m,
+    }));
 
-  // Initial poll
-  pollActivity();
+  let systemIdleSec = 0;
+  try {
+    systemIdleSec = powerMonitor.getSystemIdleTime();
+  } catch (e) {
+    // Unsupported platform — treat as active.
+  }
+  const isUserIdle = systemIdleSec >= IDLE_THRESHOLD_SEC;
+
+  accrue(windows, isUserIdle);
+  persist();
+
+  const focused = windows.find((w) => w.isActive);
+  const browserWindows = windows.filter((w) => isBrowser(w.appName) && !w.isMinimized);
+
+  currentActivity = {
+    activeApp: focused ? focused.appName : null,
+    activeTitle: focused ? focused.windowTitle : null,
+    openWindows: windows,
+    totalWindows: windows.length,
+    // Each browser window's title is its foreground tab, so this counts the
+    // browser tabs currently on screen — not every tab that exists.
+    totalTabs: browserWindows.length,
+    browserWindows: browserWindows.map((w) => ({ appName: w.appName, windowTitle: w.windowTitle })),
+    isUserIdle,
+    systemIdleSec,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('activity:update', currentActivity);
+  }
+}
+
+function setupMonitoring(persistentStore, mainWindow) {
+  if (pollTimer) return; // already running
+  store = persistentStore;
+  trackingDate = todayStr();
+  loadPersisted();
+  lastTickAt = null;
+
+  startWorker((rows) => handleSnapshot(rows, mainWindow));
+
+  pollTimer = setInterval(requestPoll, POLL_MS);
+  setTimeout(requestPoll, 1200);
 
   console.log('🖥️ Window monitoring started');
 }
 
 function stopMonitoring() {
-  if (monitorInterval) clearInterval(monitorInterval);
-  if (activeWindowInterval) clearInterval(activeWindowInterval);
-  monitorInterval = null;
-  activeWindowInterval = null;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  persist();
+  if (psProc) {
+    const proc = psProc;
+    psProc = null;
+    try { proc.stdin.write('QUIT\n'); } catch (e) { /* already gone */ }
+    setTimeout(() => { try { proc.kill(); } catch (e) { /* already exited */ } }, 500);
+  }
+  psReady = false;
   console.log('🖥️ Window monitoring stopped');
-}
-
-function getCurrentActivity() {
-  return currentActivity;
 }
 
 module.exports = {
@@ -251,5 +368,10 @@ module.exports = {
   stopMonitoring,
   getCurrentActivity,
   getAppUsageSummary,
+  getTitleUsageSummary,
+  getTrackingDate,
+  getTotals,
   resetAppTimers,
+  isBrowser,
+  todayStr,
 };

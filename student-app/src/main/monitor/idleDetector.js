@@ -1,17 +1,25 @@
-// Idle Detector — Random 15-30 min notifications with loud alarm
-const { BrowserWindow, screen } = require('electron');
+// Idle Detector — random presence checks while a study session is running.
+//
+// The study clock already auto-pauses on real inactivity (see studyTracker).
+// This adds the deliberate "are you still there?" prompt: a random check every
+// 15-30 minutes that pauses the session if the student does not answer.
+const { BrowserWindow, screen, powerMonitor } = require('electron');
 const path = require('path');
 
-let idleCheckInterval = null;
+const MIN_MINUTES = 15;
+const MAX_MINUTES = 30;
+const RESPONSE_TIMEOUT_MS = 2 * 60 * 1000;
+
+let nextCheckTimer = null;
+let responseTimer = null;
 let idleAlertWindow = null;
-let idleTimeout = null;
 let isIdle = false;
-let studyPaused = false;
 let idleStartTime = null;
 let onIdleCallback = null;
 let onResumeCallback = null;
+let storeRef = null;
+let windowRef = null;
 
-// Generate random interval between min and max minutes
 function randomInterval(minMinutes, maxMinutes) {
   const min = minMinutes * 60 * 1000;
   const max = maxMinutes * 60 * 1000;
@@ -19,40 +27,57 @@ function randomInterval(minMinutes, maxMinutes) {
 }
 
 function setupIdleDetector(store, mainWindow) {
-  // Schedule the first idle check
-  scheduleNextCheck(store, mainWindow);
-  console.log('💤 Idle detector started (15-30 min random intervals)');
-}
+  storeRef = store;
+  windowRef = mainWindow;
+  scheduleNextCheck();
 
-function scheduleNextCheck(store, mainWindow) {
-  if (idleCheckInterval) clearTimeout(idleCheckInterval);
-
-  const interval = randomInterval(15, 30);
-  const minutesApprox = Math.round(interval / 60000);
-  console.log(`⏰ Next idle check in ~${minutesApprox} minutes`);
-
-  idleCheckInterval = setTimeout(() => {
-    triggerIdleCheck(store, mainWindow);
-  }, interval);
-}
-
-function triggerIdleCheck(store, mainWindow) {
-  // Show the idle check alert
-  showIdleAlert(mainWindow);
-
-  // Send event to renderer
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('idle:check', { timestamp: Date.now() });
+  // A locked or sleeping machine is unambiguously idle — no need to ask.
+  try {
+    powerMonitor.on('lock-screen', () => markAsIdle('screen locked'));
+    powerMonitor.on('suspend', () => markAsIdle('system suspended'));
+    powerMonitor.on('resume', () => scheduleNextCheck());
+    powerMonitor.on('unlock-screen', () => scheduleNextCheck());
+  } catch (e) {
+    // Power events are unavailable on some platforms.
   }
 
-  // Set timeout — if not responded in 2 minutes, mark as idle
-  idleTimeout = setTimeout(() => {
-    markAsIdle(store, mainWindow);
-  }, 2 * 60 * 1000); // 2 minutes timeout
+  console.log('💤 Idle detector started (' + MIN_MINUTES + '-' + MAX_MINUTES + ' min random checks)');
 }
 
-function showIdleAlert(mainWindow) {
-  // Get the primary display size for a full-screen overlay
+function scheduleNextCheck() {
+  if (nextCheckTimer) clearTimeout(nextCheckTimer);
+
+  const interval = randomInterval(MIN_MINUTES, MAX_MINUTES);
+  console.log('⏰ Next presence check in ~' + Math.round(interval / 60000) + ' minutes');
+
+  nextCheckTimer = setTimeout(triggerIdleCheck, interval);
+}
+
+function triggerIdleCheck() {
+  // Only ask while a session is actually running; nobody wants a popup when
+  // they are not studying.
+  const study = storeRef && storeRef.get('studyState');
+  if (!study || !study.isStudying) {
+    scheduleNextCheck();
+    return;
+  }
+
+  showIdleAlert();
+
+  if (windowRef && !windowRef.isDestroyed()) {
+    windowRef.webContents.send('idle:check', { timestamp: Date.now() });
+  }
+
+  responseTimer = setTimeout(() => markAsIdle('no response'), RESPONSE_TIMEOUT_MS);
+}
+
+function showIdleAlert() {
+  if (idleAlertWindow && !idleAlertWindow.isDestroyed()) {
+    idleAlertWindow.show();
+    idleAlertWindow.focus();
+    return;
+  }
+
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
 
   idleAlertWindow = new BrowserWindow({
@@ -73,102 +98,91 @@ function showIdleAlert(mainWindow) {
     },
   });
 
-  // Load the idle alert HTML
   idleAlertWindow.loadFile(path.join(__dirname, '../../renderer/idle-alert.html'));
   idleAlertWindow.setAlwaysOnTop(true, 'screen-saver');
-  idleAlertWindow.show();
-  idleAlertWindow.focus();
+  idleAlertWindow.once('ready-to-show', () => {
+    idleAlertWindow.show();
+    idleAlertWindow.focus();
+  });
+  idleAlertWindow.on('closed', () => { idleAlertWindow = null; });
 }
 
-function respondToIdleCheck(isHere, store, mainWindow) {
-  // Clear the timeout
-  if (idleTimeout) {
-    clearTimeout(idleTimeout);
-    idleTimeout = null;
-  }
-
-  // Close alert window
+function closeAlert() {
   if (idleAlertWindow && !idleAlertWindow.isDestroyed()) {
     idleAlertWindow.close();
-    idleAlertWindow = null;
   }
+  idleAlertWindow = null;
+}
+
+function respondToIdleCheck(isHere) {
+  if (responseTimer) {
+    clearTimeout(responseTimer);
+    responseTimer = null;
+  }
+  closeAlert();
 
   if (isHere) {
-    // Student confirmed they're here
     isIdle = false;
-    studyPaused = false;
+    idleStartTime = null;
     console.log('✅ Student confirmed presence');
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('idle:resolved', { wasIdle: false });
+    if (windowRef && !windowRef.isDestroyed()) {
+      windowRef.webContents.send('idle:resolved', { wasIdle: false });
     }
+    if (onResumeCallback) onResumeCallback(0);
+    scheduleNextCheck();
   } else {
-    markAsIdle(store, mainWindow);
+    markAsIdle('student said no');
   }
 
-  // Schedule next check
-  scheduleNextCheck(store, mainWindow);
+  return { success: true };
 }
 
-function markAsIdle(store, mainWindow) {
+function markAsIdle(reason) {
+  if (responseTimer) {
+    clearTimeout(responseTimer);
+    responseTimer = null;
+  }
+  closeAlert();
+
+  if (isIdle) return;
   isIdle = true;
-  studyPaused = true;
   idleStartTime = Date.now();
 
-  console.log('💤 Student marked as IDLE — study paused');
+  console.log('💤 Marked idle (' + reason + ') — study paused');
 
-  // Close alert window
-  if (idleAlertWindow && !idleAlertWindow.isDestroyed()) {
-    idleAlertWindow.close();
-    idleAlertWindow = null;
+  if (windowRef && !windowRef.isDestroyed()) {
+    windowRef.webContents.send('idle:detected', { timestamp: idleStartTime, reason, studyPaused: true });
   }
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('idle:detected', {
-      timestamp: idleStartTime,
-      studyPaused: true,
-    });
-  }
-
-  if (onIdleCallback) onIdleCallback();
+  if (onIdleCallback) onIdleCallback(reason);
+  scheduleNextCheck();
 }
 
-function resumeFromIdle(store, mainWindow) {
+function resumeFromIdle() {
   const idleDuration = idleStartTime ? Math.round((Date.now() - idleStartTime) / 1000) : 0;
   isIdle = false;
-  studyPaused = false;
   idleStartTime = null;
 
-  console.log(`✅ Resumed from idle (was idle for ${idleDuration}s)`);
+  console.log('✅ Resumed from idle (was idle ' + idleDuration + 's)');
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('idle:resolved', {
-      wasIdle: true,
-      idleDurationSec: idleDuration,
-    });
+  if (windowRef && !windowRef.isDestroyed()) {
+    windowRef.webContents.send('idle:resolved', { wasIdle: true, idleDurationSec: idleDuration });
   }
 
   if (onResumeCallback) onResumeCallback(idleDuration);
-  scheduleNextCheck(store, mainWindow);
+  scheduleNextCheck();
+  return idleDuration;
 }
 
 function stopIdleDetector() {
-  if (idleCheckInterval) {
-    clearTimeout(idleCheckInterval);
-    idleCheckInterval = null;
-  }
-  if (idleTimeout) {
-    clearTimeout(idleTimeout);
-    idleTimeout = null;
-  }
-  if (idleAlertWindow && !idleAlertWindow.isDestroyed()) {
-    idleAlertWindow.close();
-    idleAlertWindow = null;
-  }
+  if (nextCheckTimer) { clearTimeout(nextCheckTimer); nextCheckTimer = null; }
+  if (responseTimer) { clearTimeout(responseTimer); responseTimer = null; }
+  closeAlert();
 }
 
 function getIdleState() {
-  return { isIdle, studyPaused, idleStartTime };
+  return { isIdle, idleStartTime };
 }
 
 function setCallbacks(onIdleCb, onResumeCb) {

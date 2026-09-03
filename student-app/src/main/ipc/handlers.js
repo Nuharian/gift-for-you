@@ -1,71 +1,59 @@
-// IPC Handlers — Bridge between main process and renderer (Firebase Edition)
+// IPC Handlers — bridge between the main process and the renderer.
+const { app, shell } = require('electron');
 const { initFirebase, getDb } = require('../firebase');
-const { setupMonitoring, stopMonitoring, getCurrentActivity } = require('../monitor/windowMonitor');
-const { setupIdleDetector, respondToIdleCheck } = require('../monitor/idleDetector');
-const { setupDataSync, forceSyncNow } = require('../sync/dataSync');
-const { setupFirebaseListeners } = require('../sync/socketClient');
+const {
+  setupMonitoring, getCurrentActivity, getAppUsageSummary,
+  getTitleUsageSummary, getTotals,
+} = require('../monitor/windowMonitor');
+const { setupIdleDetector, respondToIdleCheck, getIdleState } = require('../monitor/idleDetector');
+const { setupDataSync, forceSyncNow, saveSession, getSyncStatus } = require('../sync/dataSync');
+const { setupFirebaseListeners, sendReply } = require('../sync/socketClient');
+const { setupAutoStart, disableAutoStart, isAutoStartEnabled } = require('../autostart');
+const updater = require('../update/updater');
+const studyTracker = require('../study/studyTracker');
 
-const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyA4DGA-jHP-OF-TAHKxjsvP5kHxqIu8dPY',
-  authDomain: 'zahra-s-space.firebaseapp.com',
-  projectId: 'zahra-s-space',
-  storageBucket: 'zahra-s-space.firebasestorage.app',
-  messagingSenderId: '1086414376413',
-  appId: '1:1086414376413:web:32b5cdd29a87cad39d3a34',
-};
+const DEFAULT_FIREBASE_CONFIG = require('../firebaseConfig');
 
-let studyState = {
-  isStudying: false,
-  isBreak: false,
-  isIdle: false,
-  startTime: null,
-  elapsedSeconds: 0,
-};
-let studyTimer = null;
-
-function setupIpcHandlers(ipcMain, store, mainWindow) {
+function setupIpcHandlers(ipcMain, store, mainWindow, hooks) {
+  const onQuitRequested = (hooks && hooks.onQuitRequested) || (() => {});
 
   // ── Registration ──────────────────────────────────
   ipcMain.handle('register', async (event, payload) => {
     try {
-      const name = typeof payload === 'string' ? payload : payload.name;
-      const firebaseConfig = (payload && payload.firebaseConfig && payload.firebaseConfig.apiKey) 
-        ? payload.firebaseConfig 
+      const name = typeof payload === 'string' ? payload : (payload && payload.name);
+      if (!name || !name.trim()) {
+        return { success: false, error: 'Please enter your name.' };
+      }
+
+      const firebaseConfig = (payload && payload.firebaseConfig && payload.firebaseConfig.apiKey)
+        ? payload.firebaseConfig
         : DEFAULT_FIREBASE_CONFIG;
 
-      // Save Firebase config and init
       store.set('firebaseConfig', firebaseConfig);
-      const initialized = initFirebase(firebaseConfig);
-      if (!initialized) {
-        return { success: false, error: 'Failed to connect to Firebase database.' };
+      if (!initFirebase(firebaseConfig)) {
+        return { success: false, error: 'Failed to connect to the database.' };
       }
 
       const db = getDb();
       const { doc, setDoc } = require('firebase/firestore');
-
-      // Generate student ID
       const studentId = 'student_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
 
-      // Register in Firestore
       await setDoc(doc(db, 'gfy_students', studentId), {
         id: studentId,
         name: name.trim(),
         registeredAt: new Date().toISOString(),
         lastSeen: new Date().toISOString(),
+        lastSeenMs: Date.now(),
         isOnline: true,
         status: 'online',
+        appVersion: app.getVersion(),
       });
 
-      // Save locally
       store.set('studentId', studentId);
       store.set('studentName', name.trim());
       store.set('isRegistered', true);
 
-      // Start all services
-      setupFirebaseListeners(studentId, mainWindow);
-      setupMonitoring(store, mainWindow);
-      setupIdleDetector(store, mainWindow);
-      setupDataSync(store);
+      startAllServices(store, mainWindow);
 
       return { success: true, student: { id: studentId, name: name.trim() } };
     } catch (error) {
@@ -77,147 +65,78 @@ function setupIpcHandlers(ipcMain, store, mainWindow) {
   ipcMain.handle('getProfile', () => ({
     id: store.get('studentId'),
     name: store.get('studentName'),
-    isRegistered: store.get('isRegistered'),
+    isRegistered: !!store.get('isRegistered'),
+    version: app.getVersion(),
   }));
 
-  ipcMain.handle('isRegistered', () => store.get('isRegistered') || false);
+  ipcMain.handle('isRegistered', () => !!store.get('isRegistered'));
 
-  // ── Study Tracker ─────────────────────────────────
+  // ── Study tracker ─────────────────────────────────
   ipcMain.handle('startStudying', async () => {
-    studyState = {
-      isStudying: true,
-      isBreak: false,
-      isIdle: false,
-      startTime: Date.now(),
-      elapsedSeconds: 0,
-    };
-    store.set('studyState', studyState);
-
-    if (studyTimer) clearInterval(studyTimer);
-    studyTimer = setInterval(() => {
-      if (studyState.isStudying && !studyState.isBreak && !studyState.isIdle) {
-        studyState.elapsedSeconds++;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('study:update', studyState);
-        }
-      }
-    }, 1000);
-
-    // Update status in Firebase
-    const db = getDb();
-    if (db) {
-      const { doc, updateDoc } = require('firebase/firestore');
-      const studentId = store.get('studentId');
-      try {
-        await updateDoc(doc(db, 'gfy_students', studentId), { status: 'studying' });
-      } catch (e) { /* ignore */ }
-    }
-
-    return studyState;
+    const state = studyTracker.start();
+    forceSyncNow();
+    return state;
   });
 
   ipcMain.handle('stopStudying', async () => {
-    if (studyTimer) { clearInterval(studyTimer); studyTimer = null; }
-
-    const duration = studyState.elapsedSeconds;
-    const durationMin = Math.round(duration / 60);
-
-    // Save session to Firebase
-    if (durationMin > 0) {
-      const db = getDb();
-      if (db) {
-        const { doc, setDoc } = require('firebase/firestore');
-        const studentId = store.get('studentId');
-        const sessionId = 'session_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-        const today = new Date().toISOString().split('T')[0];
-
-        try {
-          await setDoc(doc(db, 'gfy_study_sessions', sessionId), {
-            id: sessionId,
-            studentId,
-            startTime: new Date(studyState.startTime).toISOString(),
-            endTime: new Date().toISOString(),
-            durationMin,
-            date: today,
-          });
-        } catch (e) {
-          console.error('Failed to save study session:', e);
-        }
-
-        // Update status
-        try {
-          const { updateDoc: update } = require('firebase/firestore');
-          await update(doc(db, 'gfy_students', studentId), { status: 'online' });
-        } catch (e) { /* ignore */ }
-      }
-    }
-
-    studyState = { isStudying: false, isBreak: false, isIdle: false, startTime: null, elapsedSeconds: 0 };
-    store.set('studyState', studyState);
-
-    await forceSyncNow(store);
-    return { durationMin };
+    const session = studyTracker.stop();
+    await saveSession(session);
+    await forceSyncNow();
+    return { durationMin: Math.round(session.seconds / 60), durationSeconds: session.seconds };
   });
 
   ipcMain.handle('startBreak', async () => {
-    studyState.isBreak = true;
-    store.set('studyState', studyState);
-
-    const db = getDb();
-    if (db) {
-      const { doc, updateDoc } = require('firebase/firestore');
-      const studentId = store.get('studentId');
-      try { await updateDoc(doc(db, 'gfy_students', studentId), { status: 'break' }); } catch (e) {}
-    }
-
-    return studyState;
+    const state = studyTracker.startBreak();
+    forceSyncNow();
+    return state;
   });
 
   ipcMain.handle('resumeStudying', async () => {
-    studyState.isBreak = false;
-    store.set('studyState', studyState);
-
-    const db = getDb();
-    if (db) {
-      const { doc, updateDoc } = require('firebase/firestore');
-      const studentId = store.get('studentId');
-      try { await updateDoc(doc(db, 'gfy_students', studentId), { status: 'studying' }); } catch (e) {}
-    }
-
-    return studyState;
+    const state = studyTracker.resume();
+    forceSyncNow();
+    return state;
   });
 
-  ipcMain.handle('getStudyState', () => studyState);
+  ipcMain.handle('getStudyState', () => studyTracker.getState());
 
-  // ── Idle Check ────────────────────────────────────
-  ipcMain.handle('respondToIdleCheck', (event, isHere) => {
-    respondToIdleCheck(isHere, store, mainWindow);
-    return { success: true };
-  });
+  ipcMain.handle('getStats', () => ({
+    todayStudySeconds: studyTracker.getTodayTotalSeconds(),
+    dayTotals: studyTracker.getDayTotals(),
+    usage: getTotals(),
+    topApps: getAppUsageSummary().slice(0, 10),
+    topTitles: getTitleUsageSummary(10),
+    sync: getSyncStatus(),
+  }));
+
+  // ── Idle check ────────────────────────────────────
+  ipcMain.handle('respondToIdleCheck', (event, isHere) => respondToIdleCheck(isHere));
+  ipcMain.handle('getIdleState', () => getIdleState());
 
   // ── Messages ──────────────────────────────────────
+  // Equality-only query: Firestore serves it from the automatic single-field
+  // index, so no composite index has to be deployed for messages to work.
   ipcMain.handle('getMessages', async () => {
     const db = getDb();
     if (!db) return [];
     try {
-      const { collection, query, where, orderBy, getDocs } = require('firebase/firestore');
+      const { collection, query, where, getDocs } = require('firebase/firestore');
       const studentId = store.get('studentId');
-      const q = query(
+      const snapshot = await getDocs(query(
         collection(db, 'gfy_messages'),
-        where('studentId', '==', studentId),
-        orderBy('sentAt', 'desc')
-      );
-      const snapshot = await getDocs(q);
-      return snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        where('studentId', '==', studentId)
+      ));
+      return snapshot.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => String(b.sentAt || '').localeCompare(String(a.sentAt || '')));
     } catch (error) {
-      console.error('Error fetching messages:', error);
+      console.error('Error fetching messages:', error.message);
       return [];
     }
   });
 
   ipcMain.handle('markMessageRead', async (event, messageId) => {
     const db = getDb();
-    if (!db) return { success: false };
+    if (!db || !messageId) return { success: false };
     try {
       const { doc, updateDoc } = require('firebase/firestore');
       await updateDoc(doc(db, 'gfy_messages', messageId), {
@@ -226,16 +145,78 @@ function setupIpcHandlers(ipcMain, store, mainWindow) {
       });
       return { success: true };
     } catch (error) {
-      return { success: false };
+      return { success: false, error: error.message };
     }
   });
 
+  ipcMain.handle('replyToTeacher', async (event, text) =>
+    sendReply(text, store.get('studentName')));
+
   // ── Activity ──────────────────────────────────────
   ipcMain.handle('getCurrentActivity', () => getCurrentActivity());
+  ipcMain.handle('getAppUsage', () => getAppUsageSummary());
+  ipcMain.handle('getTitleUsage', () => getTitleUsageSummary(30));
+  ipcMain.handle('syncNow', async () => {
+    await forceSyncNow();
+    return getSyncStatus();
+  });
 
-  // ── Window Controls ───────────────────────────────
-  ipcMain.on('window:minimize', () => { if (mainWindow) mainWindow.minimize(); });
-  ipcMain.on('window:close', () => { if (mainWindow) mainWindow.hide(); });
+  // ── Settings ──────────────────────────────────────
+  ipcMain.handle('getSettings', () => ({
+    autoStart: isAutoStartEnabled(),
+    startMinimized: store.get('startMinimized') !== false,
+    notificationsEnabled: store.get('notificationsEnabled') !== false,
+    soundEnabled: store.get('soundEnabled') !== false,
+    version: app.getVersion(),
+  }));
+
+  ipcMain.handle('setSetting', (event, key, value) => {
+    if (key === 'autoStart') {
+      if (value) setupAutoStart(store); else disableAutoStart();
+    } else {
+      store.set(key, value);
+    }
+    return { success: true };
+  });
+
+  // ── Updates ───────────────────────────────────────
+  ipcMain.handle('getUpdateStatus', () => updater.getStatus());
+  ipcMain.handle('checkForUpdates', () => {
+    updater.checkForUpdates(true);
+    return updater.getStatus();
+  });
+  ipcMain.handle('installUpdate', () => {
+    onQuitRequested();
+    return { success: updater.quitAndInstall() };
+  });
+
+  ipcMain.handle('openExternal', (event, url) => {
+    if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
+  });
+
+  // ── Window controls ───────────────────────────────
+  ipcMain.on('window:minimize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize(); });
+  ipcMain.on('window:close', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide(); });
 }
 
-module.exports = { setupIpcHandlers };
+// Starts monitoring, idle checks, sync and the message listener. Safe to call
+// after registration or on boot; each piece guards against double-starting.
+function startAllServices(store, mainWindow) {
+  const studentId = store.get('studentId');
+  if (!studentId) return;
+
+  studyTracker.init(store, mainWindow, (session) => { saveSession(session); });
+  setupFirebaseListeners(studentId, mainWindow);
+  setupMonitoring(store, mainWindow);
+  setupIdleDetector(store, mainWindow);
+  setupDataSync(store, app.getVersion());
+
+  // A presence check that goes unanswered pauses the clock; confirming resumes.
+  const { setCallbacks } = require('../monitor/idleDetector');
+  setCallbacks(
+    () => { studyTracker.setIdle(true); forceSyncNow(); },
+    () => { studyTracker.setIdle(false); forceSyncNow(); }
+  );
+}
+
+module.exports = { setupIpcHandlers, startAllServices };
