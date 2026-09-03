@@ -1,56 +1,87 @@
-// Student service — Firestore operations for student data
+// Student service — roster and presence.
+//
+// Every query here is either a whole-collection read or a document read.
+// Nothing combines a filter with an orderBy on another field, so no composite
+// index has to exist for the dashboard to work.
 import { db } from './firebase';
-import {
-  collection, doc, getDocs, getDoc, setDoc, updateDoc,
-  onSnapshot, query, orderBy, where, serverTimestamp,
-} from 'firebase/firestore';
+import { collection, doc, getDocs, getDoc, onSnapshot } from 'firebase/firestore';
 
 const STUDENTS_COLLECTION = 'gfy_students';
 
-// Get all students
+// A student whose heartbeat is older than this is treated as offline, even if
+// the app never got the chance to write isOnline:false (crash, lost power).
+export const OFFLINE_AFTER_MS = 45 * 1000;
+
+function sortByName(students) {
+  return students.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+}
+
+// Derives the status actually shown, so a stale record can never keep a
+// student pinned to "studying" forever.
+export function decorateStudent(student, now = Date.now()) {
+  const lastSeenMs = student.lastSeenMs
+    || (student.lastSeen ? new Date(student.lastSeen).getTime() : 0);
+  const isStale = !lastSeenMs || (now - lastSeenMs) > OFFLINE_AFTER_MS;
+  const isOnline = !!student.isOnline && !isStale;
+
+  // While a session is running the elapsed count keeps growing between
+  // heartbeats; extrapolate so the dashboard clock ticks smoothly.
+  let liveSessionSeconds = student.currentSessionSeconds || 0;
+  let liveTodaySeconds = student.todayStudySeconds || 0;
+  if (isOnline && student.studyRunning && lastSeenMs) {
+    const drift = Math.max(0, Math.floor((now - lastSeenMs) / 1000));
+    liveSessionSeconds += drift;
+    liveTodaySeconds += drift;
+  }
+
+  return {
+    ...student,
+    lastSeenMs,
+    isOnline,
+    isStale,
+    status: isOnline ? (student.status || 'online') : 'offline',
+    liveSessionSeconds,
+    liveTodaySeconds,
+  };
+}
+
 export async function getAllStudents() {
   if (!db) return [];
   try {
-    const snapshot = await getDocs(
-      query(collection(db, STUDENTS_COLLECTION), orderBy('registeredAt', 'desc'))
-    );
-    return snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const snapshot = await getDocs(collection(db, STUDENTS_COLLECTION));
+    return sortByName(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })));
   } catch (error) {
     console.error('Error fetching students:', error);
     return [];
   }
 }
 
-// Subscribe to students in real-time
-export function subscribeToStudents(callback) {
+export function subscribeToStudents(callback, onError) {
   if (!db) return () => {};
-  const q = query(collection(db, STUDENTS_COLLECTION), orderBy('registeredAt', 'desc'));
-  return onSnapshot(q, (snapshot) => {
-    const students = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-    callback(students);
-  });
+  return onSnapshot(
+    collection(db, STUDENTS_COLLECTION),
+    (snapshot) => callback(sortByName(snapshot.docs.map((d) => ({ id: d.id, ...d.data() })))),
+    (error) => {
+      console.error('Students listener error:', error);
+      if (onError) onError(error);
+    }
+  );
 }
 
-// Get a single student
 export async function getStudent(studentId) {
   if (!db) return null;
   try {
-    const docRef = doc(db, STUDENTS_COLLECTION, studentId);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) return { id: docSnap.id, ...docSnap.data() };
-    return null;
+    const docSnap = await getDoc(doc(db, STUDENTS_COLLECTION, studentId));
+    return docSnap.exists() ? { id: docSnap.id, ...docSnap.data() } : null;
   } catch (error) {
     console.error('Error fetching student:', error);
     return null;
   }
 }
 
-// Subscribe to a single student's live data
 export function subscribeToStudent(studentId, callback) {
   if (!db) return () => {};
   return onSnapshot(doc(db, STUDENTS_COLLECTION, studentId), (docSnap) => {
-    if (docSnap.exists()) {
-      callback({ id: docSnap.id, ...docSnap.data() });
-    }
+    if (docSnap.exists()) callback({ id: docSnap.id, ...docSnap.data() });
   });
 }

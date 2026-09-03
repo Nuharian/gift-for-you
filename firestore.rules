@@ -1,0 +1,51 @@
+rules_version = '2';
+
+// Gift For You — Firestore security rules.
+//
+// The deployed project currently allows exactly these five collections, and
+// the apps are written to stay inside them, so deploying this file is
+// OPTIONAL — everything works without it. Deploy it if you want the rules
+// checked into version control, or if the console rules ever expire.
+//
+//   firebase deploy --only firestore:rules
+//
+// NOTE: these rules are open, matching how the project is already configured.
+// Anyone with the (public, client-side) API key can read and write these
+// collections. Tighten them with Firebase Auth before using this with real
+// student data beyond a trusted group.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Student roster, presence, and the live study clock.
+    match /gfy_students/{studentId} {
+      allow read, write: if true;
+    }
+
+    // Point-in-time activity snapshots (history).
+    match /gfy_activity/{docId} {
+      allow read, write: if true;
+    }
+
+    // Per-app and per-window time. Also holds two fixed-id document shapes:
+    //   {studentId}__live          current desktop state
+    //   {studentId}__YYYY-MM-DD    that day's totals
+    match /gfy_app_usage/{docId} {
+      allow read, write: if true;
+    }
+
+    // Completed study sessions.
+    match /gfy_study_sessions/{sessionId} {
+      allow read, write: if true;
+    }
+
+    // Teacher <-> student messages, distinguished by the `from` field.
+    match /gfy_messages/{messageId} {
+      allow read, write: if true;
+    }
+
+    // Everything else is denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
