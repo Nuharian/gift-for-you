@@ -2,7 +2,7 @@
   "name": "gift-for-you",
   "version": "1.1.0",
   "private": true,
-  "description": "Gift For You — Student Monitoring Desktop App",
+  "description": "Gift For You \u2014 Student Monitoring Desktop App",
   "main": "src/main/main.js",
   "author": "Gift For You",
   "scripts": {
@@ -10,7 +10,10 @@
     "build": "electron-builder --win nsis",
     "pack": "electron-builder --dir",
     "release": "electron-builder --win nsis --publish always",
-    "draft": "electron-builder --win nsis --publish onTagOrDraft"
+    "draft": "electron-builder --win nsis --publish onTagOrDraft",
+    "prebuild": "node scripts/prepare-build-cache.js",
+    "prerelease": "node scripts/prepare-build-cache.js",
+    "predraft": "node scripts/prepare-build-cache.js"
   },
   "dependencies": {
     "electron-store": "^8.2.0",

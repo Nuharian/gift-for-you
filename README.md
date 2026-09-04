@@ -91,21 +91,16 @@ Every running student app picks it up within six hours — or immediately if the
 
 To publish a draft first and release it manually, use `npm run draft`.
 
-### If the build fails on "Cannot create symbolic link"
+### About the build cache
 
-electron-builder downloads a code-signing bundle that contains macOS symlinks, and
-extracting those on Windows needs elevated rights. The build stops before it reaches
-the NSIS step, leaving only `dist/win-unpacked` and no installer.
+electron-builder ships its signing tools for all platforms in one archive, and
+extracting the macOS part on Windows needs elevated rights — without them the
+build stops before the NSIS step, leaving no installer and no `latest.yml`.
 
-Fix it once, either way:
-
-- **Turn on Windows Developer Mode** (Settings → System → For developers), or
-- Pre-extract the bundle without the macOS files:
-  ```bash
-  CACHE="$LOCALAPPDATA/electron-builder/Cache/winCodeSign"
-  7za="./student-app/node_modules/7zip-bin/win/x64/7za.exe"
-  "$7za" x -bd "$CACHE/winCodeSign-2.6.0.7z" "-o$CACHE/winCodeSign-2.6.0" "-xr!darwin" -y
-  ```
+`npm run build` handles this automatically: a `prebuild` hook populates the
+cache with the macOS files skipped (we only ship Windows). It is a no-op once
+the cache is good, and if it ever fails the build proceeds exactly as it would
+have. Turning on Windows Developer Mode also fixes it permanently.
 
 A successful build produces three files in `student-app/dist/`:
 
@@ -166,5 +161,14 @@ with no activity are included as zero rows so averages are not skewed.
 - **Per-app time** — how long each app was open, and how long it was actually focused.
 - **Per-window/tab time** — the same, keyed by window title. Since a browser window's title is its active tab, this answers "which tab was open longest" and "which one were they actually working in".
 - **Presence checks** — a random prompt every 15–30 minutes during a session; no answer within 2 minutes pauses the clock.
+
+### Starting with Windows
+
+The app registers itself under `HKCU\...\CurrentVersion\Run` and launches
+hidden in the tray at every login. It re-registers on each start, so an update
+that changes the install path cannot leave a dead entry behind, and it never
+overrides a student who switched it off in Settings. Registration is skipped in
+development builds so `npm run dev` does not add a login item pointing at
+electron.exe.
 
 Time is only credited while the student is actually at the keyboard, so a window left open overnight does not read as eight hours of work. Daily counters are persisted locally and written as absolute totals, so restarting the app never resets the teacher's view.
