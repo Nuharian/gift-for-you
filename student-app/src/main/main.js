@@ -21,6 +21,21 @@ if (!gotTheLock) {
   return;
 }
 
+// Node terminates the process on an unhandled promise rejection, and every
+// sync and monitor timer is async. One bad read inside an interval callback
+// was therefore enough to kill a student's app mid-session — it vanished from
+// the dashboard with no crash dialog and no log. This app is a background tray
+// process that must outlive transient faults, so faults are logged and the
+// timers are left to recover on their next tick.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection (ignored, app kept alive):',
+    (reason && reason.stack) || reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception (ignored, app kept alive):', error && error.stack);
+});
+
 const store = new Store({
   name: 'gift-for-you-config',
   defaults: {

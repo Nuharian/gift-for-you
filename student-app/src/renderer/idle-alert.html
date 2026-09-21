@@ -57,7 +57,7 @@
   </div>
 
   <script>
-    // A looping WebAudio alarm; no audio file has to ship with the app.
+    // A looping WebAudio chime; no audio file has to ship with the app.
     let ctx = null;
     let stopped = false;
 
@@ -66,23 +66,35 @@
       try {
         if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
         const now = ctx.currentTime;
-        [880, 660].forEach((freq, i) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'square';
-          osc.frequency.value = freq;
-          gain.gain.setValueAtTime(0.0001, now + i * 0.25);
-          gain.gain.exponentialRampToValueAtTime(0.18, now + i * 0.25 + 0.03);
-          gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.25 + 0.22);
-          osc.connect(gain).connect(ctx.destination);
-          osc.start(now + i * 0.25);
-          osc.stop(now + i * 0.25 + 0.25);
+
+        // Soft low-pass: noticeable without being jarring during study.
+        const tone = ctx.createBiquadFilter();
+        tone.type = 'lowpass';
+        tone.frequency.value = 1600;
+        tone.Q.value = 0.4;
+        tone.connect(ctx.destination);
+
+        // A calm descending two-note motif (C5 - G4), each note ringing out.
+        [523.25, 392.0].forEach((freq, i) => {
+          const at = now + i * 0.45;
+          [[freq, 0.14], [freq * 2, 0.035]].forEach(function (pair) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = pair[0];
+            gain.gain.setValueAtTime(0.0001, at);
+            gain.gain.linearRampToValueAtTime(pair[1], at + 0.07);
+            gain.gain.exponentialRampToValueAtTime(0.0001, at + 1.4);
+            osc.connect(gain).connect(tone);
+            osc.start(at);
+            osc.stop(at + 1.5);
+          });
         });
       } catch (e) { /* audio unavailable */ }
     }
 
     beep();
-    const alarmTimer = setInterval(beep, 2500);
+    const alarmTimer = setInterval(beep, 3500);
 
     document.getElementById('btnConfirm').onclick = async () => {
       stopped = true;

@@ -206,6 +206,16 @@ function startAllServices(store, mainWindow) {
   if (!studentId) return;
 
   studyTracker.init(store, mainWindow, (session) => { saveSession(session); });
+
+  // If the sync watchdog rebuilds the Firestore client, the message listener
+  // is still bound to the torn-down one and would stay silent for the rest of
+  // the session. Re-subscribe against the new client instead.
+  const { setOnReinit } = require('../firebase');
+  setOnReinit(() => {
+    console.log('↻ Re-attaching message listener to the rebuilt client');
+    setupFirebaseListeners(studentId, mainWindow);
+  });
+
   setupFirebaseListeners(studentId, mainWindow);
   setupMonitoring(store, mainWindow);
   setupIdleDetector(store, mainWindow);
