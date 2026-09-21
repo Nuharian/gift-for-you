@@ -435,7 +435,16 @@ export default function DashboardPage() {
                     {student.isOnline && !student.activeTitle && (
                       <div className="student-card-active-window">🖥️ Monitoring active…</div>
                     )}
-                    {!student.isOnline && (
+                    {!student.isOnline && student.stoppedUnexpectedly && (
+                      <div
+                        className="student-card-active-window"
+                        style={{ color: '#f59e0b', fontWeight: 600 }}
+                        title="The app stopped without shutting down cleanly. It may have crashed, lost connection, or the computer was switched off."
+                      >
+                        ⚠️ Not reporting — app stopped {timeSince(student.lastSeen)}
+                      </div>
+                    )}
+                    {!student.isOnline && !student.stoppedUnexpectedly && (
                       <div className="student-card-active-window" style={{ opacity: 0.5 }}>
                         ⚫ Offline — last seen {timeSince(student.lastSeen)}
                       </div>

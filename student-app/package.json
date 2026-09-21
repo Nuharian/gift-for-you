@@ -1,6 +1,6 @@
 {
   "name": "gift-for-you",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Gift For You \u2014 Student Monitoring Desktop App",
   "main": "src/main/main.js",

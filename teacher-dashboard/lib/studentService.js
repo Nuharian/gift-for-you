@@ -34,11 +34,19 @@ export function decorateStudent(student, now = Date.now()) {
     liveTodaySeconds += drift;
   }
 
+  // A clean quit writes isOnline:false on the way out. A record still claiming
+  // to be online while its heartbeat has aged out therefore means the app
+  // stopped without shutting down — it crashed, lost its connection, or the
+  // machine went off. That is a fault worth showing the teacher, because it
+  // looks identical to "went home" otherwise and can go unnoticed for days.
+  const stoppedUnexpectedly = !!student.isOnline && isStale;
+
   return {
     ...student,
     lastSeenMs,
     isOnline,
     isStale,
+    stoppedUnexpectedly,
     status: isOnline ? (student.status || 'online') : 'offline',
     liveSessionSeconds,
     liveTodaySeconds,

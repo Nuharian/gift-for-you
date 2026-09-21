@@ -536,24 +536,40 @@ function handleMessagesSync(data) {
   }
 }
 
-// A short WebAudio chime avoids shipping an audio file that may be missing.
+// A soft WebAudio bell chime avoids shipping an audio file that may be missing.
 function playChime() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const now = ctx.currentTime;
-    [880, 1320].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.0001, now + i * 0.12);
-      gain.gain.exponentialRampToValueAtTime(0.25, now + i * 0.12 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.12 + 0.35);
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now + i * 0.12);
-      osc.stop(now + i * 0.12 + 0.4);
+
+    // A gentle low-pass keeps the bell warm instead of piercing.
+    const master = ctx.createGain();
+    master.gain.value = 0.9;
+    const tone = ctx.createBiquadFilter();
+    tone.type = 'lowpass';
+    tone.frequency.value = 2200;
+    tone.Q.value = 0.4;
+    tone.connect(master).connect(ctx.destination);
+
+    // A slow major arpeggio (G4 - C5 - E5) whose notes ring and overlap softly.
+    [392.0, 523.25, 659.25].forEach((freq, i) => {
+      const at = now + i * 0.22;
+      // Fundamental plus a quiet octave for a little shimmer.
+      [[freq, 0.16], [freq * 2, 0.04]].forEach(function (pair) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = pair[0];
+        gain.gain.setValueAtTime(0.0001, at);
+        gain.gain.linearRampToValueAtTime(pair[1], at + 0.06);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + 1.6);
+        osc.connect(gain).connect(tone);
+        osc.start(at);
+        osc.stop(at + 1.7);
+      });
     });
-    setTimeout(() => ctx.close(), 1200);
+
+    setTimeout(() => ctx.close(), 2800);
   } catch (e) {
     // Audio is optional.
   }
