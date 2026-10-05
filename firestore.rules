@@ -39,6 +39,7 @@ service cloud.firestore {
     }
 
     // Teacher <-> student messages, distinguished by the `from` field.
+    // Also holds routines (`kind: 'routine'`) and the student's answer to them.
     match /gfy_messages/{messageId} {
       allow read, write: if true;
     }

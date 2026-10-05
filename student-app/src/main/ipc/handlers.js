@@ -7,7 +7,10 @@ const {
 } = require('../monitor/windowMonitor');
 const { setupIdleDetector, respondToIdleCheck, getIdleState } = require('../monitor/idleDetector');
 const { setupDataSync, forceSyncNow, saveSession, getSyncStatus } = require('../sync/dataSync');
-const { setupFirebaseListeners, sendReply } = require('../sync/socketClient');
+const {
+  setupFirebaseListeners, sendReply, respondToRoutine, isRoutine,
+} = require('../sync/socketClient');
+const routineScheduler = require('../routine/routineScheduler');
 const { setupAutoStart, disableAutoStart, isAutoStartEnabled } = require('../autostart');
 const updater = require('../update/updater');
 const studyTracker = require('../study/studyTracker');
@@ -127,6 +130,7 @@ function setupIpcHandlers(ipcMain, store, mainWindow, hooks) {
       ));
       return snapshot.docs
         .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((m) => !isRoutine(m))
         .sort((a, b) => String(b.sentAt || '').localeCompare(String(a.sentAt || '')));
     } catch (error) {
       console.error('Error fetching messages:', error.message);
@@ -151,6 +155,15 @@ function setupIpcHandlers(ipcMain, store, mainWindow, hooks) {
 
   ipcMain.handle('replyToTeacher', async (event, text) =>
     sendReply(text, store.get('studentName')));
+
+  // ── Routines ──────────────────────────────────────
+  ipcMain.handle('getRoutines', () => ({
+    routines: routineScheduler.getRoutines(),
+    today: routineScheduler.getToday(),
+  }));
+
+  ipcMain.handle('respondToRoutine', (event, routineId, accept) =>
+    respondToRoutine(routineId, !!accept));
 
   // ── Activity ──────────────────────────────────────
   ipcMain.handle('getCurrentActivity', () => getCurrentActivity());
@@ -206,6 +219,7 @@ function startAllServices(store, mainWindow) {
   if (!studentId) return;
 
   studyTracker.init(store, mainWindow, (session) => { saveSession(session); });
+  routineScheduler.init(store, mainWindow);
 
   // If the sync watchdog rebuilds the Firestore client, the message listener
   // is still bound to the torn-down one and would stay silent for the rest of

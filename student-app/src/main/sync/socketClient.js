@@ -7,6 +7,12 @@
 // Sorting and unread filtering happen here instead.
 const { Notification } = require('electron');
 const { getDb } = require('../firebase');
+const routineScheduler = require('../routine/routineScheduler');
+
+// Routines share gfy_messages with chat messages, tagged by `kind`.
+function isRoutine(message) {
+  return !!message && message.kind === 'routine';
+}
 
 let unsubscribeMessages = null;
 let seededIds = null;
@@ -34,30 +40,40 @@ function setupFirebaseListeners(studentId, mainWindow, onChange) {
   unsubscribeMessages = onSnapshot(
     messagesQuery,
     (snapshot) => {
-      const all = snapshot.docs
+      const everything = snapshot.docs
         .map((d) => ({ id: d.id, ...d.data() }))
         .filter((m) => m.from !== 'student')
         .sort((a, b) => String(b.sentAt || '').localeCompare(String(a.sentAt || '')));
+      const all = everything.filter((m) => !isRoutine(m));
+      const routines = everything.filter(isRoutine);
 
       // The first snapshot is the existing backlog. Remember those ids so
       // starting the app doesn't replay every message the teacher ever sent,
       // but still surface anything genuinely new that arrives afterwards.
       if (seededIds === null) {
-        seededIds = new Set(all.map((m) => m.id));
+        seededIds = new Set(everything.map((m) => m.id));
       } else {
         for (const change of snapshot.docChanges()) {
           if (change.type !== 'added') continue;
           const msg = { id: change.doc.id, ...change.doc.data() };
           if (msg.from === 'student' || seededIds.has(msg.id)) continue;
           seededIds.add(msg.id);
-          deliver(msg, mainWindow);
+          if (isRoutine(msg)) deliverRoutine(msg, mainWindow);
+          else deliver(msg, mainWindow);
         }
       }
+
+      routineScheduler.setRoutines(routines);
 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('messages:sync', {
           messages: all,
           unread: all.filter((m) => !m.isRead).length,
+        });
+        mainWindow.webContents.send('routines:sync', {
+          routines,
+          today: routineScheduler.getToday(),
+          pending: routines.filter((r) => !r.status || r.status === 'pending').length,
         });
       }
       if (onMessagesChanged) onMessagesChanged(all);
@@ -112,6 +128,56 @@ function deliver(message, mainWindow) {
   }
 }
 
+// A new routine asks the student to accept it before any reminder runs.
+function deliverRoutine(routine, mainWindow) {
+  console.log('🗓️ New routine from teacher:', routine.title || '(untitled)');
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('routine:new', routine);
+    mainWindow.flashFrame(true);
+  }
+
+  try {
+    if (Notification.isSupported()) {
+      const notification = new Notification({
+        title: '🗓️ New routine: ' + (routine.title || 'Daily routine'),
+        body: 'Your teacher sent you a routine. Open Gift For You to accept or decline it.',
+        silent: false,
+      });
+      notification.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+          mainWindow.focus();
+          mainWindow.webContents.send('routine:open');
+        }
+      });
+      notification.show();
+    }
+  } catch (e) {
+    // The in-app popup and badge still announce it.
+  }
+}
+
+// The answer is written onto the routine itself, which the teacher's
+// dashboard is already watching.
+async function respondToRoutine(routineId, accept) {
+  const db = getDb();
+  if (!db || !routineId) return { success: false, error: 'Not connected' };
+  try {
+    const { doc, updateDoc } = require('firebase/firestore');
+    const now = new Date().toISOString();
+    await updateDoc(doc(db, 'gfy_messages', routineId), {
+      status: accept ? 'accepted' : 'declined',
+      respondedAt: now,
+      isRead: true,
+      readAt: now,
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 // Student → teacher replies land in the same collection, tagged `from`.
 async function sendReply(text, studentName) {
   const db = getDb();
@@ -150,4 +216,6 @@ function stopFirebaseListeners() {
   seededIds = null;
 }
 
-module.exports = { setupFirebaseListeners, stopFirebaseListeners, sendReply };
+module.exports = {
+  setupFirebaseListeners, stopFirebaseListeners, sendReply, respondToRoutine, isRoutine,
+};

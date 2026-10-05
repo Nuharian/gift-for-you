@@ -18,6 +18,11 @@ let lastStudyState = { isStudying: false, isBreak: false, elapsedSeconds: 0, isR
 let lastActivity = null;
 let unreadCount = 0;
 let updateStatus = null;
+let routineState = { routines: [], today: [] };
+let popupActionHandler = null;
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // ─── Boot ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -29,10 +34,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('popupDismiss').onclick = dismissPopup;
+  document.getElementById('popupAction').onclick = () => {
+    const handler = popupActionHandler;
+    dismissPopup();
+    if (handler) handler();
+  };
 
   // Subscribe before the first render so nothing is missed during startup.
   window.api.onMessage(handleNewMessage);
   window.api.onMessagesSync(handleMessagesSync);
+  window.api.onRoutinesSync(handleRoutinesSync);
+  window.api.onRoutineNew(handleRoutineNew);
+  window.api.onRoutineReminder(handleRoutineReminder);
+  window.api.onRoutineOpen(() => navigateTo('routine'));
   window.api.onIdleCheck(handleIdleCheck);
   window.api.onIdleDetected(handleIdleDetected);
   window.api.onIdleResolved(handleIdleResolved);
@@ -61,6 +75,7 @@ function navigateTo(page) {
 
   switch (page) {
     case 'dashboard': renderDashboard(); break;
+    case 'routine': renderRoutinePage(); break;
     case 'activity': renderActivityPage(); break;
     case 'messages': renderMessagesPage(); break;
     case 'settings': renderSettingsPage(); break;
@@ -70,6 +85,12 @@ function navigateTo(page) {
 function showApp() {
   document.getElementById('bottomNav').style.display = 'flex';
   renderDashboard();
+  // The first routines push can land before this page subscribed.
+  window.api.getRoutines().then((state) => {
+    routineState = state;
+    setRoutineBadge((state.routines || []).filter(isPendingRoutine).length);
+    if (currentPage === 'dashboard') refreshNextUp();
+  });
 }
 
 function esc(str) {
@@ -159,6 +180,8 @@ async function renderDashboard() {
         ${renderStudyTracker(studyState)}
       </div>
 
+      <div id="nextUpCard">${renderNextUp()}</div>
+
       <div class="stat-row" style="margin-bottom:14px;">
         <div class="card stat-tile">
           <div class="stat-tile-value" id="statToday">${formatShort(stats.todayStudySeconds)}</div>
@@ -183,6 +206,7 @@ async function renderDashboard() {
   `;
 
   bindStudyTrackerEvents();
+  bindNextUp();
   if (lastActivity) updateQuickActivity(lastActivity);
   else {
     const activity = await window.api.getCurrentActivity();
@@ -272,6 +296,240 @@ function renderUsageBars(items, labelKey, limit) {
       </div>
     `;
   }).join('');
+}
+
+// ─── Routine Page ─────────────────────────────────
+function isPendingRoutine(r) {
+  return !r.status || r.status === 'pending';
+}
+
+function sortedTasks(tasks) {
+  return [...(tasks || [])].sort((a, b) => String(a.start).localeCompare(String(b.start)));
+}
+
+function toMinutes(hhmm) {
+  const parts = String(hhmm || '').split(':').map(Number);
+  return (parts[0] || 0) * 60 + (parts[1] || 0);
+}
+
+function fromMinutes(total) {
+  const t = ((total % 1440) + 1440) % 1440;
+  return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
+}
+
+function formatMinutes(minutes) {
+  const m = Math.max(0, Math.round(minutes || 0));
+  if (m < 60) return m + ' min';
+  return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+}
+
+function formatDays(days) {
+  const set = [...new Set(days || [])].sort();
+  if (set.length === 0 || set.length === 7) return 'Every day';
+  if (set.join() === '1,2,3,4,5') return 'Weekdays';
+  if (set.join() === '0,6') return 'Weekends';
+  return set.map((d) => DAY_NAMES[d]).join(', ');
+}
+
+// Where each of today's tasks stands against the clock.
+function withStatus(today) {
+  const now = Date.now();
+  let nextMarked = false;
+  return (today || []).map((t) => {
+    let status = 'upcoming';
+    if (now >= t.endMs) status = 'done';
+    else if (now >= t.startMs) status = 'now';
+    else if (!nextMarked) { status = 'next'; nextMarked = true; }
+    return Object.assign({}, t, { status });
+  });
+}
+
+async function renderRoutinePage() {
+  routineState = await window.api.getRoutines();
+  drawRoutinePage();
+}
+
+function drawRoutinePage() {
+  const container = document.getElementById('appContainer');
+  const routines = routineState.routines || [];
+  const pending = routines.filter(isPendingRoutine);
+  const accepted = routines.filter((r) => r.status === 'accepted');
+  const declined = routines.filter((r) => r.status === 'declined');
+
+  container.innerHTML = `
+    <div class="animate-fadeIn">
+      <h2 style="font-size:18px;font-weight:700;margin-bottom:14px;">🗓️ My routine</h2>
+
+      ${pending.map(renderPendingRoutine).join('')}
+
+      ${accepted.length > 0 ? `
+        <div class="card" style="margin-bottom:14px;">
+          <h3 class="card-title">📅 Today — ${DAY_FULL[new Date().getDay()]}</h3>
+          ${renderTodayTasks(routineState.today)}
+        </div>
+      ` : ''}
+
+      ${routines.length === 0 ? `
+        <div class="card" style="text-align:center;padding:32px;">
+          <span style="font-size:40px;">🗓️</span>
+          <p class="muted-sm" style="margin-top:8px;">No routine yet. When your teacher sends one, it shows up here for you to accept.</p>
+        </div>
+      ` : ''}
+
+      ${accepted.length > 0 || declined.length > 0 ? `
+        <div class="card">
+          <h3 class="card-title">My routines</h3>
+          ${accepted.map((r) => renderRoutineRow(r, 'Following', '⏹ Stop', 'no')).join('')}
+          ${declined.map((r) => renderRoutineRow(r, 'Declined', '✅ Follow', 'yes')).join('')}
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  container.querySelectorAll('[data-routine-id]').forEach((btn) => {
+    btn.onclick = () => answerRoutine(btn.dataset.routineId, btn.dataset.answer === 'yes', btn);
+  });
+}
+
+function renderPendingRoutine(r) {
+  const tasks = sortedTasks(r.tasks);
+  const total = tasks.reduce((sum, t) => sum + (Number(t.durationMin) || 0), 0);
+  return `
+    <div class="card routine-pending">
+      <div class="routine-pending-head">🗓️ NEW FROM YOUR TEACHER</div>
+      <div class="routine-name">${esc(r.title || 'Daily routine')}</div>
+      <p class="muted-xs">${esc(formatDays(r.days))} · ${tasks.length} task${tasks.length === 1 ? '' : 's'} · ${formatMinutes(total)}</p>
+      <div class="task-list">
+        ${tasks.map((t) => `
+          <div class="task-item">
+            <span class="task-time">${esc(t.start)}–${fromMinutes(toMinutes(t.start) + (Number(t.durationMin) || 0))}</span>
+            <div class="task-body">
+              <div class="task-title">${esc(t.title)}</div>
+              <div class="task-meta">${formatMinutes(t.durationMin)}${t.note ? ' · ' + esc(t.note) : ''}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <p class="muted-sm" style="margin-top:10px;">Say yes and the app will remind you when each task starts and when its time is up.</p>
+      <div class="routine-actions">
+        <button class="btn btn-primary" data-routine-id="${esc(r.id)}" data-answer="yes">✅ Yes, I'll follow it</button>
+        <button class="btn btn-secondary" data-routine-id="${esc(r.id)}" data-answer="no">✖ No</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderTodayTasks(today) {
+  const tasks = withStatus(today);
+  if (tasks.length === 0) {
+    return '<p class="muted-sm">Nothing on your routine today. Enjoy! 🎉</p>';
+  }
+  const chip = { done: 'Done', now: 'Now', next: 'Next', upcoming: '' };
+  return '<div class="task-list">' + tasks.map((t) => {
+    let extra = '';
+    if (t.status === 'now') {
+      const left = Math.max(0, Math.ceil((t.endMs - Date.now()) / 60000));
+      const pct = Math.min(100, Math.round(((Date.now() - t.startMs) / (t.endMs - t.startMs)) * 100));
+      extra = ` · ${left} min left
+        <div class="task-progress"><div class="task-progress-fill" style="width:${pct}%"></div></div>`;
+    }
+    return `
+      <div class="task-item task-item-${t.status}">
+        <span class="task-time">${esc(t.start)}–${esc(t.end)}</span>
+        <div class="task-body">
+          <div class="task-title">${esc(t.title)}</div>
+          <div class="task-meta">${formatMinutes(t.durationMin)}${t.note ? ' · ' + esc(t.note) : ''}${extra}</div>
+        </div>
+        ${chip[t.status] ? `<span class="task-chip">${chip[t.status]}</span>` : ''}
+      </div>
+    `;
+  }).join('') + '</div>';
+}
+
+function renderRoutineRow(r, label, buttonText, answer) {
+  return `
+    <div class="routine-row">
+      <div style="min-width:0;">
+        <div class="task-title truncate">${esc(r.title || 'Daily routine')}</div>
+        <div class="task-meta">${label} · ${esc(formatDays(r.days))} · ${(r.tasks || []).length} tasks</div>
+      </div>
+      <button class="btn btn-secondary" data-routine-id="${esc(r.id)}" data-answer="${answer}">${buttonText}</button>
+    </div>
+  `;
+}
+
+async function answerRoutine(id, accept, button) {
+  const routine = (routineState.routines || []).find((r) => r.id === id);
+  if (!accept && routine && routine.status === 'accepted'
+    && !confirm('Stop following this routine? You will no longer get its reminders.')) return;
+
+  const label = button ? button.textContent : '';
+  if (button) { button.disabled = true; button.textContent = '⏳…'; }
+  const result = await window.api.respondToRoutine(id, accept);
+  if (result.success) {
+    // The listener pushes the updated routine and the page redraws from it.
+    toast(accept ? 'Routine accepted — reminders are on ⏰' : 'Got it — your teacher will see your answer.');
+  } else {
+    toast('⚠️ ' + (result.error || 'Could not send your answer.'));
+    if (button) { button.disabled = false; button.textContent = label; }
+  }
+}
+
+// The Home card: what to do right now, or what comes next.
+function renderNextUp() {
+  const pending = (routineState.routines || []).filter(isPendingRoutine).length;
+  if (pending > 0) {
+    return `
+      <div class="card routine-pending" style="cursor:pointer;" id="nextUpLink">
+        <div class="routine-pending-head">🗓️ YOUR TEACHER SENT A ROUTINE</div>
+        <p class="muted-sm">Tap to see it and say yes or no.</p>
+      </div>
+    `;
+  }
+
+  const tasks = withStatus(routineState.today);
+  if (tasks.length === 0) return '';
+  const current = tasks.find((t) => t.status === 'now');
+  const next = tasks.find((t) => t.status === 'next');
+
+  let body;
+  if (current) {
+    const left = Math.max(0, Math.ceil((current.endMs - Date.now()) / 60000));
+    body = `<div class="next-up-title">${esc(current.title)}</div>
+      <p class="muted-sm">Now · ${left} min left (until ${esc(current.end)})</p>`
+      + (next ? `<p class="muted-xs">Then: ${esc(next.title)} at ${esc(next.start)}</p>` : '');
+  } else if (next) {
+    body = `<div class="next-up-title">${esc(next.title)}</div>
+      <p class="muted-sm">Starts at ${esc(next.start)} · ${formatMinutes(next.durationMin)}</p>`;
+  } else {
+    body = '<p class="muted-sm">All of today\'s routine is done. Great job! 🎉</p>';
+  }
+
+  return `
+    <div class="card" style="margin-bottom:14px;cursor:pointer;" id="nextUpLink">
+      <h3 class="card-title">🗓️ ${current ? 'Right now' : 'Next up'}</h3>
+      ${body}
+    </div>
+  `;
+}
+
+function bindNextUp() {
+  const link = document.getElementById('nextUpLink');
+  if (link) link.onclick = () => navigateTo('routine');
+}
+
+function refreshNextUp() {
+  const el = document.getElementById('nextUpCard');
+  if (!el) return;
+  el.innerHTML = renderNextUp();
+  bindNextUp();
+}
+
+function setRoutineBadge(count) {
+  const badge = document.getElementById('routineBadge');
+  if (!badge) return;
+  badge.textContent = String(count);
+  badge.style.display = count > 0 ? 'flex' : 'none';
 }
 
 // ─── Activity Page ────────────────────────────────
@@ -507,17 +765,35 @@ function describeUpdate(status) {
 }
 
 // ─── Event Handlers ───────────────────────────────
-function handleNewMessage(message) {
+// One overlay serves messages, new routines and routine reminders. An optional
+// action button sits above the dismiss button.
+function showPopup(opts) {
   const popup = document.getElementById('messagePopup');
   const card = document.getElementById('messagePopupCard');
-  document.getElementById('popupEmoji').textContent = message.emoji || '💛';
-  document.getElementById('popupTitle').textContent = message.title || 'New message';
-  document.getElementById('popupBody').textContent = message.body || '';
-  card.style.borderColor = message.color || '#FFE5D9';
-  card.dataset.msgid = message.id || '';
-  popup.style.display = 'flex';
+  const action = document.getElementById('popupAction');
+  document.getElementById('popupEmoji').textContent = opts.emoji || '💛';
+  document.getElementById('popupTitle').textContent = opts.title || '';
+  document.getElementById('popupBody').textContent = opts.body || '';
+  document.getElementById('popupDismiss').textContent = opts.dismissLabel || 'Got it! 👍';
+  card.style.borderColor = opts.color || '#FFE5D9';
+  card.dataset.msgid = opts.messageId || '';
 
+  popupActionHandler = opts.onAction || null;
+  action.style.display = opts.actionLabel ? 'block' : 'none';
+  action.textContent = opts.actionLabel || '';
+
+  popup.style.display = 'flex';
   playChime();
+}
+
+function handleNewMessage(message) {
+  showPopup({
+    emoji: message.emoji,
+    title: message.title || 'New message',
+    body: message.body,
+    color: message.color,
+    messageId: message.id,
+  });
   setUnread(unreadCount + 1);
 }
 
@@ -525,7 +801,46 @@ function dismissPopup() {
   const popup = document.getElementById('messagePopup');
   const id = document.getElementById('messagePopupCard').dataset.msgid;
   popup.style.display = 'none';
+  popupActionHandler = null;
   if (id) window.api.markMessageRead(id);
+}
+
+function handleRoutinesSync(data) {
+  routineState = { routines: data.routines || [], today: data.today || [] };
+  setRoutineBadge(data.pending || 0);
+  if (currentPage === 'routine') drawRoutinePage();
+  if (currentPage === 'dashboard') refreshNextUp();
+}
+
+function handleRoutineNew(routine) {
+  showPopup({
+    emoji: '🗓️',
+    title: 'New routine from your teacher',
+    body: (routine.title || 'Daily routine') + ' · ' + formatDays(routine.days)
+      + ' · ' + (routine.tasks || []).length + ' tasks',
+    color: routine.color || '#E2D1F9',
+    actionLabel: '👀 See it & answer',
+    onAction: () => navigateTo('routine'),
+    dismissLabel: 'Later',
+  });
+}
+
+function handleRoutineReminder(reminder) {
+  const offerStart = reminder.type === 'start' && !lastStudyState.isStudying;
+  showPopup({
+    emoji: reminder.type === 'start' ? '⏰' : '✅',
+    title: reminder.title,
+    body: reminder.body,
+    color: '#E2D1F9',
+    actionLabel: offerStart ? '📖 Start study session' : null,
+    onAction: async () => {
+      await window.api.startStudying();
+      navigateTo('dashboard');
+    },
+    dismissLabel: 'OK 👍',
+  });
+  if (currentPage === 'routine') drawRoutinePage();
+  if (currentPage === 'dashboard') refreshNextUp();
 }
 
 function handleMessagesSync(data) {
@@ -729,6 +1044,15 @@ setInterval(() => {
   const el = document.getElementById('encourageMsg');
   if (el && lastStudyState.isRunning) el.textContent = ENCOURAGING_MESSAGES[messageIndex];
 }, 3 * 60 * 1000);
+
+// Task states (now / next / done) follow the clock, and the day's schedule is
+// re-read so it rolls over at midnight.
+setInterval(async () => {
+  if (currentPage !== 'routine' && currentPage !== 'dashboard') return;
+  routineState = await window.api.getRoutines();
+  if (currentPage === 'routine') drawRoutinePage();
+  else refreshNextUp();
+}, 30000);
 
 setInterval(async () => {
   if (currentPage !== 'dashboard') return;

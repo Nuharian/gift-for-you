@@ -13,6 +13,10 @@ import {
   gatherExportData, buildSummaryCsv, buildAppsCsv, buildWindowsCsv,
   buildSessionsCsv, buildMarkdownReport, downloadFile, exportFilename,
 } from '../../lib/exportService';
+import {
+  DAY_NAMES, ALL_DAYS, isRoutine, sendRoutine, deleteRoutine, cleanTasks,
+  sortTasks, toMinutes, fromMinutes, formatDuration, formatDays,
+} from '../../lib/routineService';
 
 const PRESET_COLORS = [
   { label: 'Peach', value: '#FFE5D9' },
@@ -61,6 +65,18 @@ function getStatusDotClass(status) {
     offline: 'status-dot-offline',
   };
   return map[status] || 'status-dot-offline';
+}
+
+const ROUTINE_STATUS = {
+  pending: { className: 'badge-break', label: '⏳ Waiting for answer' },
+  accepted: { className: 'badge-online', label: '✅ Accepted' },
+  declined: { className: 'badge-idle', label: '✖ Declined' },
+};
+
+let taskKey = 0;
+function newTaskRow(start = '16:00') {
+  taskKey += 1;
+  return { key: taskKey, title: '', start, durationMin: 45, note: '' };
 }
 
 function timeSince(isoString) {
@@ -156,6 +172,13 @@ export default function DashboardPage() {
   const [exporting, setExporting] = useState('');
   const [exportNote, setExportNote] = useState('');
 
+  const [rtTitle, setRtTitle] = useState('');
+  const [rtDays, setRtDays] = useState(ALL_DAYS);
+  const [rtTasks, setRtTasks] = useState(() => [newTaskRow()]);
+  const [rtTarget, setRtTarget] = useState('all');
+  const [rtSending, setRtSending] = useState(false);
+  const [rtNote, setRtNote] = useState('');
+
   const statsLoadedFor = useRef('');
 
   // Auth check
@@ -244,10 +267,80 @@ export default function DashboardPage() {
     return () => { unsubLive(); unsubDaily(); };
   }, [selectedId]);
 
+  // Routines share the messages collection but are not part of the chat.
+  const routines = useMemo(() => allMessages.filter(isRoutine), [allMessages]);
+
   const threadMessages = useMemo(
-    () => (selectedId ? allMessages.filter((m) => m.studentId === selectedId) : []),
+    () => (selectedId ? allMessages.filter((m) => m.studentId === selectedId && !isRoutine(m)) : []),
     [allMessages, selectedId]
   );
+
+  const visibleRoutines = useMemo(
+    () => (selectedId ? routines.filter((r) => r.studentId === selectedId) : routines),
+    [routines, selectedId]
+  );
+
+  // The most recent routine per student, for the roster cards. `routines` is
+  // already newest first.
+  const latestRoutineByStudent = useMemo(() => {
+    const map = {};
+    for (const r of routines) if (!map[r.studentId]) map[r.studentId] = r;
+    return map;
+  }, [routines]);
+
+  const studentNames = useMemo(
+    () => Object.fromEntries(decorated.map((s) => [s.id, s.name])),
+    [decorated]
+  );
+
+  // Sending to one student needs one selected; fall back to the class.
+  const routineTargets = rtTarget === 'selected' && selected ? [selected] : decorated;
+  const plannedTasks = useMemo(() => cleanTasks(rtTasks), [rtTasks]);
+  const plannedMinutes = plannedTasks.reduce((sum, t) => sum + t.durationMin, 0);
+
+  const updateTask = (key, patch) =>
+    setRtTasks((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  // A new row starts where the last one ends, which is how a routine is
+  // usually written down.
+  const addTask = () => setRtTasks((rows) => {
+    const last = rows[rows.length - 1];
+    const lastStart = last ? toMinutes(last.start) : null;
+    const start = lastStart === null ? '16:00' : fromMinutes(lastStart + (Number(last.durationMin) || 0));
+    return [...rows, newTaskRow(start)];
+  });
+
+  const removeTask = (key) =>
+    setRtTasks((rows) => (rows.length > 1 ? rows.filter((r) => r.key !== key) : [newTaskRow()]));
+
+  const toggleDay = (day) =>
+    setRtDays((days) => (days.includes(day) ? days.filter((d) => d !== day) : [...days, day].sort()));
+
+  const loadRoutineAsTemplate = (routine) => {
+    setRtTitle(routine.title || '');
+    setRtDays(routine.days && routine.days.length ? routine.days : ALL_DAYS);
+    setRtTasks(sortTasks(routine.tasks).map((t) => ({
+      ...newTaskRow(t.start), title: t.title, durationMin: t.durationMin, note: t.note || '',
+    })));
+    setRtNote('Loaded into the builder — change it and send again.');
+    setTimeout(() => setRtNote(''), 4000);
+  };
+
+  const handleSendRoutine = useCallback(async () => {
+    if (plannedTasks.length === 0 || routineTargets.length === 0) return;
+    setRtSending(true);
+    setRtNote('');
+    try {
+      const sent = await sendRoutine(routineTargets, { title: rtTitle, days: rtDays, tasks: plannedTasks });
+      setRtNote(`✅ Sent to ${sent} student${sent === 1 ? '' : 's'} — they will be asked to accept it.`);
+      setRtTitle('');
+      setRtTasks([newTaskRow()]);
+    } catch (e) {
+      setRtNote('⚠️ Could not send: ' + e.message);
+    }
+    setRtSending(false);
+    setTimeout(() => setRtNote(''), 6000);
+  }, [plannedTasks, routineTargets, rtTitle, rtDays]);
 
   // Mark student replies read once the teacher is looking at the thread.
   useEffect(() => {
@@ -459,6 +552,11 @@ export default function DashboardPage() {
                     <span className="student-card-stat">
                       🪟 {student.totalWindows || 0} · 🌐 {student.totalTabs || 0}
                     </span>
+                    {latestRoutineByStudent[student.id] && (
+                      <span className="student-card-stat">
+                        🗓️ {(ROUTINE_STATUS[latestRoutineByStudent[student.id].status] || ROUTINE_STATUS.pending).label}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -625,6 +723,186 @@ export default function DashboardPage() {
           )}
         </section>
       )}
+
+      {/* ── Routines ────────────────────────────────── */}
+      <section className="section">
+        <div className="section-header">
+          <h2 className="section-title">🗓️ Routines</h2>
+          <span className="muted-text">
+            {routines.filter((r) => r.status === 'accepted').length} accepted ·{' '}
+            {routines.filter((r) => !r.status || r.status === 'pending').length} waiting ·{' '}
+            {routines.filter((r) => r.status === 'declined').length} declined
+          </span>
+        </div>
+
+        <div className="routine-layout">
+          <div className="card">
+            <h3 className="detail-subheading">✍️ Build a routine</h3>
+            <p className="muted-text" style={{ marginBottom: '14px' }}>
+              The student is asked to accept it. Once they do, their app reminds them when each
+              task starts and when its time is up. Times are in the student&apos;s own clock.
+            </p>
+
+            <div className="msg-option-group">
+              <div className="msg-option-label">Send to</div>
+              <div className="priority-row">
+                <button
+                  className={`btn btn-secondary priority-btn ${rtTarget === 'all' ? 'active' : ''}`}
+                  onClick={() => setRtTarget('all')}
+                >
+                  All students ({decorated.length})
+                </button>
+                <button
+                  className={`btn btn-secondary priority-btn ${rtTarget === 'selected' && selected ? 'active' : ''}`}
+                  onClick={() => setRtTarget('selected')}
+                  disabled={!selected}
+                >
+                  {selected ? selected.name : 'Select a student first'}
+                </button>
+              </div>
+            </div>
+
+            <input
+              className="input"
+              type="text"
+              placeholder="Routine name, e.g. After-school plan"
+              value={rtTitle}
+              onChange={(e) => setRtTitle(e.target.value)}
+              style={{ marginTop: '14px' }}
+            />
+
+            <div className="msg-option-group" style={{ marginTop: '14px' }}>
+              <div className="msg-option-label">Days</div>
+              <div className="day-row">
+                {DAY_NAMES.map((name, day) => (
+                  <button
+                    key={name}
+                    className={`day-chip ${rtDays.includes(day) ? 'active' : ''}`}
+                    onClick={() => toggleDay(day)}
+                  >
+                    {name}
+                  </button>
+                ))}
+                <button className="quick-chip" onClick={() => setRtDays(ALL_DAYS)}>Every day</button>
+                <button className="quick-chip" onClick={() => setRtDays([1, 2, 3, 4, 5])}>Weekdays</button>
+              </div>
+            </div>
+
+            <div className="msg-option-label" style={{ marginTop: '14px' }}>Tasks</div>
+            <div className="task-rows">
+              <div className="task-row task-row-head">
+                <span>Starts</span><span>Task</span><span>Minutes</span><span />
+              </div>
+              {rtTasks.map((t) => (
+                <div className="task-row" key={t.key}>
+                  <input
+                    className="input"
+                    type="time"
+                    value={t.start}
+                    onChange={(e) => updateTask(t.key, { start: e.target.value })}
+                  />
+                  <div className="task-text">
+                    <input
+                      className="input"
+                      type="text"
+                      placeholder="What to do, e.g. Maths homework"
+                      value={t.title}
+                      onChange={(e) => updateTask(t.key, { title: e.target.value })}
+                    />
+                    <input
+                      className="input input-note"
+                      type="text"
+                      placeholder="Note (optional)"
+                      value={t.note}
+                      onChange={(e) => updateTask(t.key, { note: e.target.value })}
+                    />
+                  </div>
+                  <input
+                    className="input"
+                    type="number"
+                    min="1"
+                    max="600"
+                    value={t.durationMin}
+                    onChange={(e) => updateTask(t.key, { durationMin: e.target.value })}
+                  />
+                  <button className="btn btn-icon" onClick={() => removeTask(t.key)} title="Remove task">✕</button>
+                </div>
+              ))}
+            </div>
+            <button className="btn btn-secondary btn-sm" onClick={addTask} style={{ marginTop: '10px' }}>
+              ＋ Add task
+            </button>
+
+            <p className="muted-text" style={{ marginTop: '14px' }}>
+              {plannedTasks.length} task{plannedTasks.length === 1 ? '' : 's'} · {formatDuration(plannedMinutes)} in
+              total · {formatDays(rtDays)}
+            </p>
+
+            <button
+              className="btn btn-primary btn-lg"
+              onClick={handleSendRoutine}
+              disabled={rtSending || plannedTasks.length === 0 || routineTargets.length === 0}
+              style={{ marginTop: '12px' }}
+            >
+              {rtSending
+                ? '⏳ Sending…'
+                : rtTarget === 'selected' && selected
+                  ? `Send routine to ${selected.name} 🗓️`
+                  : `Send routine to all (${decorated.length}) 🗓️`}
+            </button>
+            {rtNote && <p className="export-note">{rtNote}</p>}
+          </div>
+
+          <div className="card">
+            <h3 className="detail-subheading">
+              📋 {selected ? `${selected.name}'s routines` : 'Sent routines'}
+            </h3>
+            {visibleRoutines.length === 0 ? (
+              <p className="muted-text">
+                {selected ? 'No routine sent to this student yet.' : 'No routines sent yet.'}
+              </p>
+            ) : (
+              <div className="routine-list">
+                {visibleRoutines.map((r) => {
+                  const status = ROUTINE_STATUS[r.status] || ROUTINE_STATUS.pending;
+                  return (
+                    <div className="routine-item" key={r.id}>
+                      <div className="routine-item-head">
+                        <div>
+                          <div className="routine-item-title">{r.title || 'Daily routine'}</div>
+                          <div className="muted-text">
+                            {!selected && <>{studentNames[r.studentId] || r.studentName || 'Unknown'} · </>}
+                            {formatDays(r.days)} · sent {timeSince(r.sentAt)}
+                            {r.respondedAt && <> · answered {timeSince(r.respondedAt)}</>}
+                          </div>
+                        </div>
+                        <span className={`badge ${status.className}`}>{status.label}</span>
+                      </div>
+                      <ul className="routine-tasks">
+                        {sortTasks(r.tasks).map((t) => (
+                          <li key={t.id}>
+                            <span className="mono">{t.start}–{fromMinutes(toMinutes(t.start) + t.durationMin)}</span>
+                            <span>{t.title}</span>
+                            <span className="muted-text">{formatDuration(t.durationMin)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="routine-item-actions">
+                        <button className="btn btn-secondary btn-sm" onClick={() => loadRoutineAsTemplate(r)}>
+                          ✏️ Use as template
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => deleteRoutine(r.id)}>
+                          🗑️ Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* ── Data export ─────────────────────────────── */}
       <section className="section">

@@ -21,6 +21,7 @@ The student app writes on three cadences so the teacher sees a live clock withou
 | 2m | `gfy_activity/{auto}` | point-in-time history snapshots |
 | on stop | `gfy_study_sessions/{id}` | a completed study session |
 | on send | `gfy_messages/{id}` | teacher → student and student → teacher |
+| on send / answer | `gfy_messages/{id}` with `kind: 'routine'` | a routine, and the student's accept/decline |
 
 **Every read is either a document fetch by id or a single-equality-filter query.** Nothing pairs a filter with an `orderBy` on another field, so Firestore serves it all from automatic indexes — **no composite index needs to be created**, and sorting happens in memory.
 
@@ -123,6 +124,35 @@ firebase deploy --only firestore:rules
 ```
 
 The rules are open (anyone with the public API key can read and write). That matches how the project is already set up; add Firebase Auth before using this beyond a trusted group.
+
+---
+
+## Routines
+
+The dashboard's **🗓️ Routines** panel builds a routine: a name, the days it
+applies, and a list of tasks, each with a start time and a length in minutes.
+Send it to one selected student or the whole class.
+
+The student gets a popup and a **Routine** tab where they answer **Yes** or
+**No**. The teacher sees the answer on the routine and on the student's card.
+Once accepted, the app reminds the student with a Windows notification and an
+in-app popup:
+
+- **when a task starts**: what to do, for how long, and the teacher's note,
+  with a button to start a study session;
+- **when its time is up**: what comes next, or that the day is done.
+
+The Routine tab shows today's tasks marked Done / Now / Next, and the Home
+screen shows what to do right now. A student can stop following a routine, or
+accept one they declined, at any time. Deleting a routine on the dashboard
+removes it from the student's app and stops its reminders.
+
+Times are the student's own clock. Reminders more than three minutes late
+(PC asleep, app closed) are skipped rather than delivered out of context.
+
+Routines are stored in `gfy_messages` tagged `kind: 'routine'`, because the
+live Firestore rules only admit the existing collections. App versions before
+1.2.0 show a routine as an ordinary message carrying a text summary.
 
 ---
 

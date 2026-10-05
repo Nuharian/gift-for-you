@@ -11,6 +11,7 @@ const { setupAutoStart } = require('./autostart');
 const { setupIpcHandlers, startAllServices } = require('./ipc/handlers');
 const updater = require('./update/updater');
 const studyTracker = require('./study/studyTracker');
+const routineScheduler = require('./routine/routineScheduler');
 const DEFAULT_FIREBASE_CONFIG = require('./firebaseConfig');
 
 // A second copy of the app would double-count every timer, so the instance
@@ -189,6 +190,7 @@ async function shutdown() {
   shuttingDown = true;
   stopIdleDetector();
   studyTracker.stopTicking();
+  routineScheduler.stop();
   stopMonitoring();
   stopFirebaseListeners();
   updater.stopUpdater();

@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld('api', {
   markMessageRead: (id) => ipcRenderer.invoke('markMessageRead', id),
   replyToTeacher: (text) => ipcRenderer.invoke('replyToTeacher', text),
 
+  // Routines
+  getRoutines: () => ipcRenderer.invoke('getRoutines'),
+  respondToRoutine: (id, accept) => ipcRenderer.invoke('respondToRoutine', id, accept),
+
   // Activity
   getCurrentActivity: () => ipcRenderer.invoke('getCurrentActivity'),
   getAppUsage: () => ipcRenderer.invoke('getAppUsage'),
@@ -58,6 +62,10 @@ contextBridge.exposeInMainWorld('api', {
   // Events from the main process — each returns an unsubscribe function.
   onMessage: on('message:new'),
   onMessagesSync: on('messages:sync'),
+  onRoutinesSync: on('routines:sync'),
+  onRoutineNew: on('routine:new'),
+  onRoutineReminder: on('routine:reminder'),
+  onRoutineOpen: on('routine:open'),
   onIdleCheck: on('idle:check'),
   onIdleDetected: on('idle:detected'),
   onIdleResolved: on('idle:resolved'),
