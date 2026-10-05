@@ -8,3 +8,4 @@ build
 dev.db
 dev.db-journal
 .DS_Store
+dist-release
